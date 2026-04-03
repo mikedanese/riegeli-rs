@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: |
+          curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
+          unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
+          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test
+        run: cargo test -p riegeli
+
+      - name: Build benchmarks
+        run: cargo build --benches -p riegeli
+
+      - name: Docs
+        run: cargo doc -p riegeli --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test-ffi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: |
+          curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
+          unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
+          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+
+      - name: Cache FFI build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-ffi-${{ hashFiles('riegeli-ffi/build.rs', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ffi-
+
+      - name: Test FFI
+        run: cargo test -p riegeli-ffi
