@@ -2,7 +2,10 @@
 //!
 //! Provides the wire type enum and tag composition/decomposition functions
 //! matching the C++ `riegeli/messages/message_wire_format.h`, plus
-//! `is_proto_message` for canonical proto binary validation.
+//! `is_proto_message` for canonical proto binary validation, and a zero-copy
+//! field iterator for streaming proto field access.
+
+use crate::varint;
 
 /// The part of a field tag which denotes the representation of the field value
 /// that follows the tag.
@@ -42,9 +45,8 @@ impl WireType {
 /// Composes a proto field tag from a field number and wire type.
 ///
 /// The tag is `(field_number << 3) | wire_type`.
-#[cfg(test)]
 #[inline]
-pub(crate) fn make_tag(field_number: u32, wire_type: WireType) -> u32 {
+pub fn make_tag(field_number: u32, wire_type: WireType) -> u32 {
     (field_number << 3) | (wire_type as u32)
 }
 
@@ -146,6 +148,297 @@ fn skip_canonical_varint64(data: &[u8], pos: usize) -> Option<usize> {
     }
     // More than 10 bytes.
     None
+}
+
+// ---------------------------------------------------------------------------
+// Public varint helpers
+// ---------------------------------------------------------------------------
+
+/// Reads a canonical varint64 from `data[pos..]`, returning the decoded value
+/// and the number of bytes consumed.
+///
+/// Returns `None` if the varint is missing, truncated, overlong (>10 bytes),
+/// or non-canonical (trailing zero byte in a multi-byte encoding).
+pub fn read_canonical_varint64(data: &[u8], pos: usize) -> Option<(u64, usize)> {
+    if pos > data.len() {
+        return None;
+    }
+    let remaining = &data[pos..];
+    if remaining.is_empty() {
+        return None;
+    }
+
+    let mut result: u64 = 0;
+    for i in 0..MAX_VARINT64_LEN {
+        if i >= remaining.len() {
+            return None;
+        }
+        let byte = remaining[i];
+        let low7 = (byte & 0x7F) as u64;
+        // On the 10th byte (i==9), only the lowest bit is valid for u64.
+        if i == 9 && low7 > 1 {
+            return None;
+        }
+        result |= low7 << (7 * i);
+
+        if byte < 0x80 {
+            // Canonical check: last byte must not be 0 in multi-byte varint.
+            if i > 0 && byte == 0 {
+                return None;
+            }
+            return Some((result, i + 1));
+        }
+    }
+    // More than 10 bytes.
+    None
+}
+
+/// Appends a varint-encoded `u64` value to the given buffer.
+pub fn encode_varint64(buf: &mut Vec<u8>, v: u64) {
+    let encoded = varint::encode_u64(v);
+    buf.extend_from_slice(&encoded);
+}
+
+/// Appends a varint-encoded `u32` value to the given buffer.
+pub fn encode_varint32(buf: &mut Vec<u8>, v: u32) {
+    let encoded = varint::encode_u32(v);
+    buf.extend_from_slice(&encoded);
+}
+
+/// Appends a proto field tag (field_number + wire_type) as a varint to the
+/// given buffer.
+pub fn encode_tag(buf: &mut Vec<u8>, field_number: u32, wire_type: WireType) {
+    encode_varint32(buf, make_tag(field_number, wire_type));
+}
+
+// ---------------------------------------------------------------------------
+// Zigzag encoding helpers
+// ---------------------------------------------------------------------------
+
+/// Encodes a signed 32-bit integer using zigzag encoding.
+///
+/// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...
+pub fn zigzag_encode_i32(v: i32) -> u32 {
+    ((v << 1) ^ (v >> 31)) as u32
+}
+
+/// Encodes a signed 64-bit integer using zigzag encoding.
+///
+/// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...
+pub fn zigzag_encode_i64(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+// ---------------------------------------------------------------------------
+// Proto field iterator
+// ---------------------------------------------------------------------------
+
+/// The value component of a decoded proto field.
+///
+/// For variable-length types (`LengthDelimited`), the value borrows from the
+/// input slice. For fixed-width types and varints, the value is stored inline.
+/// Group markers (`StartGroup`, `EndGroup`) carry no value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue<'a> {
+    /// A decoded varint value.
+    Varint(u64),
+    /// A 32-bit fixed-width value (little-endian).
+    Fixed32(u32),
+    /// A 64-bit fixed-width value (little-endian).
+    Fixed64(u64),
+    /// A length-delimited byte slice borrowed from the input.
+    LengthDelimited(&'a [u8]),
+    /// Start of a group (deprecated but valid). No associated value.
+    StartGroup,
+    /// End of a group (deprecated but valid). No associated value.
+    EndGroup,
+}
+
+/// A single decoded field from a serialized protobuf message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtoField<'a> {
+    /// The proto field number (1+).
+    pub field_number: u32,
+    /// The wire type of this field.
+    pub wire_type: WireType,
+    /// The decoded value.
+    pub value: FieldValue<'a>,
+}
+
+/// A zero-copy iterator over proto fields in a serialized message.
+///
+/// Yields `Result<ProtoField, crate::RiegeliError>` for each field encountered.
+/// On error (truncation, invalid wire type, etc.), the error is returned once
+/// and subsequent calls to `next()` return `None`.
+///
+/// Group fields (`StartGroup` / `EndGroup`) are yielded as flat events; the
+/// iterator does not automatically consume group contents.
+pub struct ProtoFieldIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+    errored: bool,
+}
+
+impl<'a> ProtoFieldIter<'a> {
+    /// Creates a new field iterator over the given serialized proto bytes.
+    pub fn new(data: &'a [u8]) -> Self {
+        ProtoFieldIter {
+            data,
+            pos: 0,
+            errored: false,
+        }
+    }
+}
+
+impl<'a> Iterator for ProtoFieldIter<'a> {
+    type Item = Result<ProtoField<'a>, crate::RiegeliError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.errored || self.pos >= self.data.len() {
+            return None;
+        }
+
+        // Read the tag.
+        let (tag, tag_len) = match read_canonical_varint32(self.data, self.pos) {
+            Some(v) => v,
+            None => {
+                self.errored = true;
+                return Some(Err(crate::RiegeliError::MalformedData(format!(
+                    "invalid or truncated tag at offset {}",
+                    self.pos
+                ))));
+            }
+        };
+
+        let field_number = tag_field_number(tag);
+        if field_number == 0 {
+            self.errored = true;
+            return Some(Err(crate::RiegeliError::MalformedData(format!(
+                "field number 0 at offset {}",
+                self.pos
+            ))));
+        }
+
+        let wire_type = match tag_wire_type(tag) {
+            Some(wt) => wt,
+            None => {
+                self.errored = true;
+                return Some(Err(crate::RiegeliError::MalformedData(format!(
+                    "invalid wire type {} at offset {}",
+                    tag & 7,
+                    self.pos
+                ))));
+            }
+        };
+
+        self.pos += tag_len;
+
+        let value = match wire_type {
+            WireType::Varint => match read_canonical_varint64(self.data, self.pos) {
+                Some((v, consumed)) => {
+                    self.pos += consumed;
+                    FieldValue::Varint(v)
+                }
+                None => {
+                    self.errored = true;
+                    return Some(Err(crate::RiegeliError::MalformedData(format!(
+                        "invalid or truncated varint value at offset {}",
+                        self.pos
+                    ))));
+                }
+            },
+            WireType::Fixed32 => {
+                if self.pos + 4 > self.data.len() {
+                    self.errored = true;
+                    return Some(Err(crate::RiegeliError::MalformedData(format!(
+                        "truncated fixed32 at offset {}",
+                        self.pos
+                    ))));
+                }
+                let v = u32::from_le_bytes([
+                    self.data[self.pos],
+                    self.data[self.pos + 1],
+                    self.data[self.pos + 2],
+                    self.data[self.pos + 3],
+                ]);
+                self.pos += 4;
+                FieldValue::Fixed32(v)
+            }
+            WireType::Fixed64 => {
+                if self.pos + 8 > self.data.len() {
+                    self.errored = true;
+                    return Some(Err(crate::RiegeliError::MalformedData(format!(
+                        "truncated fixed64 at offset {}",
+                        self.pos
+                    ))));
+                }
+                let v = u64::from_le_bytes([
+                    self.data[self.pos],
+                    self.data[self.pos + 1],
+                    self.data[self.pos + 2],
+                    self.data[self.pos + 3],
+                    self.data[self.pos + 4],
+                    self.data[self.pos + 5],
+                    self.data[self.pos + 6],
+                    self.data[self.pos + 7],
+                ]);
+                self.pos += 8;
+                FieldValue::Fixed64(v)
+            }
+            WireType::LengthDelimited => match read_canonical_varint32(self.data, self.pos) {
+                Some((length, consumed)) => {
+                    self.pos += consumed;
+                    let length = length as usize;
+                    if self.pos + length > self.data.len() {
+                        self.errored = true;
+                        return Some(Err(crate::RiegeliError::MalformedData(format!(
+                            "length-delimited field at offset {} declares length {} but only {} bytes remain",
+                            self.pos - consumed,
+                            length,
+                            self.data.len() - self.pos
+                        ))));
+                    }
+                    let slice = &self.data[self.pos..self.pos + length];
+                    self.pos += length;
+                    FieldValue::LengthDelimited(slice)
+                }
+                None => {
+                    self.errored = true;
+                    return Some(Err(crate::RiegeliError::MalformedData(format!(
+                        "invalid or truncated length prefix at offset {}",
+                        self.pos
+                    ))));
+                }
+            },
+            WireType::StartGroup => FieldValue::StartGroup,
+            WireType::EndGroup => FieldValue::EndGroup,
+        };
+
+        Some(Ok(ProtoField {
+            field_number,
+            wire_type,
+            value,
+        }))
+    }
+}
+
+/// Serializes a `ProtoField` back to wire format, appending to the given buffer.
+///
+/// This enables round-trip: iterate fields then re-serialize each one.
+pub fn serialize_field(buf: &mut Vec<u8>, field: &ProtoField<'_>) {
+    encode_tag(buf, field.field_number, field.wire_type);
+    match &field.value {
+        FieldValue::Varint(v) => encode_varint64(buf, *v),
+        FieldValue::Fixed32(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        FieldValue::Fixed64(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        FieldValue::LengthDelimited(data) => {
+            encode_varint32(buf, data.len() as u32);
+            buf.extend_from_slice(data);
+        }
+        FieldValue::StartGroup | FieldValue::EndGroup => {
+            // Tag already written, no additional value bytes.
+        }
+    }
 }
 
 /// Validates that `data` is a canonical proto binary encoding.

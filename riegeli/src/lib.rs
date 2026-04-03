@@ -18,10 +18,10 @@ pub(crate) mod block_header;
 pub(crate) mod chunk_header;
 pub(crate) mod constants;
 pub(crate) mod hash;
-pub(crate) mod proto_wire;
+pub mod proto_wire;
 pub(crate) mod simple_chunk;
 pub(crate) mod transpose;
-pub(crate) mod varint;
+pub mod varint;
 
 // ── Generated protobuf ────────────────────────────────────────────────────────
 #[allow(clippy::all)]
