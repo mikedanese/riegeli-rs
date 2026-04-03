@@ -1,0 +1,18 @@
+[package]
+name = "riegeli-ffi"
+version = "0.1.0"
+edition = "2024"
+# Only used for testing against the C++ reference implementation; not for publishing to crates.io.
+publish = false
+
+[dependencies]
+cxx = { workspace = true }
+protobuf = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+cxx-build = { workspace = true }
+ureq = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+blake2 = { workspace = true }

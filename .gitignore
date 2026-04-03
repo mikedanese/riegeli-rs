@@ -1,1 +1,3 @@
 .claude
+/target
+*.proptest-regressions
