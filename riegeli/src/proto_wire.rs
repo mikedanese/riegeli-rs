@@ -749,6 +749,16 @@ impl SerializedMessageWriter {
         encode_tag(&mut self.buf, field_number, WireType::EndGroup);
         Ok(())
     }
+
+    /// Writes a raw `ProtoField` directly to the output buffer.
+    ///
+    /// This appends the field's tag and value bytes exactly as they would appear
+    /// in the wire format, enabling pass-through copying of fields from one
+    /// message to another without re-encoding.
+    pub fn write_field(&mut self, field: &ProtoField<'_>) -> Result<(), crate::RiegeliError> {
+        serialize_field(&mut self.buf, field);
+        Ok(())
+    }
 }
 
 impl Default for SerializedMessageWriter {
@@ -1126,6 +1136,99 @@ pub fn read_message<H: HandleField>(
     for result in iter {
         let field = result?;
         handlers.dispatch(&field)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Field Filtering
+// ---------------------------------------------------------------------------
+
+/// A filtered iterator over proto fields that yields only fields whose field
+/// numbers appear in a given set.
+///
+/// Fields not in the allowed set are skipped without copying their bytes.
+/// The underlying `ProtoFieldIter` still parses and advances past skipped
+/// fields (this is necessary to find the next field boundary), but their
+/// values are not delivered to the caller.
+///
+/// # Example
+///
+/// ```
+/// use riegeli::proto_wire::{FilteredFieldIter, SerializedMessageWriter};
+///
+/// let mut w = SerializedMessageWriter::new();
+/// w.write_uint64(1, 10).unwrap();
+/// w.write_uint64(2, 20).unwrap();
+/// w.write_uint64(3, 30).unwrap();
+/// let data = w.finish().unwrap();
+///
+/// let fields: Vec<_> = FilteredFieldIter::new(&data, &[1, 3])
+///     .collect::<Result<Vec<_>, _>>()
+///     .unwrap();
+/// assert_eq!(fields.len(), 2);
+/// assert_eq!(fields[0].field_number, 1);
+/// assert_eq!(fields[1].field_number, 3);
+/// ```
+pub struct FilteredFieldIter<'a> {
+    inner: ProtoFieldIter<'a>,
+    allowed: &'a [u32],
+}
+
+impl<'a> FilteredFieldIter<'a> {
+    /// Creates a new filtered iterator that yields only fields whose field
+    /// numbers appear in `allowed`.
+    ///
+    /// The `allowed` slice does not need to be sorted; membership is checked
+    /// via linear scan, which is efficient for the small sets typical in proto
+    /// field filtering.
+    pub fn new(data: &'a [u8], allowed: &'a [u32]) -> Self {
+        FilteredFieldIter {
+            inner: ProtoFieldIter::new(data),
+            allowed,
+        }
+    }
+}
+
+impl<'a> Iterator for FilteredFieldIter<'a> {
+    type Item = Result<ProtoField<'a>, crate::RiegeliError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next() {
+                Some(Ok(field)) => {
+                    if self.allowed.contains(&field.field_number) {
+                        return Some(Ok(field));
+                    }
+                    // Skip this field — continue to the next one.
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => return None,
+            }
+        }
+    }
+}
+
+/// Copies selected fields from a source message to a writer.
+///
+/// Iterates over the source bytes, and for each field whose field number is in
+/// `field_numbers`, writes it to `writer` using `write_field`. Fields not in
+/// the set are skipped. The output preserves the ordering of fields from the
+/// source message.
+///
+/// # Errors
+///
+/// Returns an error if the source bytes are malformed or if writing to the
+/// writer fails.
+pub fn copy_fields(
+    source: &[u8],
+    field_numbers: &[u32],
+    writer: &mut SerializedMessageWriter,
+) -> Result<(), crate::RiegeliError> {
+    let iter = FilteredFieldIter::new(source, field_numbers);
+    for result in iter {
+        let field = result?;
+        writer.write_field(&field)?;
     }
     Ok(())
 }
