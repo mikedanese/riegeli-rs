@@ -441,6 +441,320 @@ pub fn serialize_field(buf: &mut Vec<u8>, field: &ProtoField<'_>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SerializedMessageWriter
+// ---------------------------------------------------------------------------
+
+/// The maximum length of a length-delimited field body (2 GiB, the proto limit).
+const MAX_LENGTH_DELIMITED: usize = i32::MAX as usize;
+
+/// A builder for incrementally constructing serialized protobuf messages.
+///
+/// Appends tag+value pairs to an internal `Vec<u8>` buffer. Supports nested
+/// submessages via open/close length-delimited scoping, where the length prefix
+/// is back-patched after the contents are written.
+///
+/// # Example
+///
+/// ```
+/// use riegeli::proto_wire::SerializedMessageWriter;
+///
+/// let mut w = SerializedMessageWriter::new();
+/// w.write_uint64(1, 150).unwrap();
+/// let bytes = w.finish().unwrap();
+/// assert_eq!(bytes, vec![0x08, 0x96, 0x01]);
+/// ```
+pub struct SerializedMessageWriter {
+    buf: Vec<u8>,
+    /// Stack of saved positions for open length-delimited scopes.
+    /// Each entry is the buffer offset where the submessage content begins
+    /// (i.e., right after the tag; the length varint will be inserted here on close).
+    scope_stack: Vec<usize>,
+}
+
+impl SerializedMessageWriter {
+    /// Creates a new writer with an empty buffer.
+    pub fn new() -> Self {
+        SerializedMessageWriter {
+            buf: Vec::new(),
+            scope_stack: Vec::new(),
+        }
+    }
+
+    /// Creates a new writer with the given initial buffer capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        SerializedMessageWriter {
+            buf: Vec::with_capacity(capacity),
+            scope_stack: Vec::new(),
+        }
+    }
+
+    /// Returns a reference to the bytes written so far.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Consumes the writer and returns the serialized bytes.
+    ///
+    /// Returns an error if there are unclosed length-delimited scopes.
+    pub fn finish(self) -> Result<Vec<u8>, crate::RiegeliError> {
+        if !self.scope_stack.is_empty() {
+            return Err(crate::RiegeliError::MalformedData(format!(
+                "finish() called with {} unclosed length-delimited scope(s)",
+                self.scope_stack.len()
+            )));
+        }
+        Ok(self.buf)
+    }
+
+    // -- Varint wire type fields --
+
+    /// Writes a uint64 field (wire type Varint).
+    pub fn write_uint64(
+        &mut self,
+        field_number: u32,
+        value: u64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, value);
+        Ok(())
+    }
+
+    /// Writes a uint32 field (wire type Varint).
+    pub fn write_uint32(
+        &mut self,
+        field_number: u32,
+        value: u32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, value as u64);
+        Ok(())
+    }
+
+    /// Writes an int64 field (wire type Varint).
+    ///
+    /// Negative values are encoded as 10-byte varints (sign-extended to u64).
+    pub fn write_int64(
+        &mut self,
+        field_number: u32,
+        value: i64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, value as u64);
+        Ok(())
+    }
+
+    /// Writes an int32 field (wire type Varint).
+    ///
+    /// Negative values are sign-extended to i64 then encoded as 10-byte varints,
+    /// matching the proto spec.
+    pub fn write_int32(
+        &mut self,
+        field_number: u32,
+        value: i32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, value as i64 as u64);
+        Ok(())
+    }
+
+    /// Writes a sint32 field (wire type Varint, zigzag encoded).
+    pub fn write_sint32(
+        &mut self,
+        field_number: u32,
+        value: i32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, zigzag_encode_i32(value) as u64);
+        Ok(())
+    }
+
+    /// Writes a sint64 field (wire type Varint, zigzag encoded).
+    pub fn write_sint64(
+        &mut self,
+        field_number: u32,
+        value: i64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, zigzag_encode_i64(value));
+        Ok(())
+    }
+
+    /// Writes a bool field (wire type Varint).
+    pub fn write_bool(
+        &mut self,
+        field_number: u32,
+        value: bool,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Varint);
+        encode_varint64(&mut self.buf, if value { 1 } else { 0 });
+        Ok(())
+    }
+
+    // -- Fixed-width fields --
+
+    /// Writes a fixed32 field (wire type Fixed32).
+    pub fn write_fixed32(
+        &mut self,
+        field_number: u32,
+        value: u32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed32);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes a fixed64 field (wire type Fixed64).
+    pub fn write_fixed64(
+        &mut self,
+        field_number: u32,
+        value: u64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed64);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes an sfixed32 field (wire type Fixed32).
+    pub fn write_sfixed32(
+        &mut self,
+        field_number: u32,
+        value: i32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed32);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes an sfixed64 field (wire type Fixed64).
+    pub fn write_sfixed64(
+        &mut self,
+        field_number: u32,
+        value: i64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed64);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes a float field (wire type Fixed32).
+    pub fn write_float(
+        &mut self,
+        field_number: u32,
+        value: f32,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed32);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes a double field (wire type Fixed64).
+    pub fn write_double(
+        &mut self,
+        field_number: u32,
+        value: f64,
+    ) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::Fixed64);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    // -- Length-delimited fields --
+
+    /// Writes a bytes field (wire type LengthDelimited).
+    ///
+    /// Returns an error if the data exceeds the 2 GiB proto limit.
+    pub fn write_bytes(
+        &mut self,
+        field_number: u32,
+        data: &[u8],
+    ) -> Result<(), crate::RiegeliError> {
+        if data.len() > MAX_LENGTH_DELIMITED {
+            return Err(crate::RiegeliError::MalformedData(format!(
+                "length-delimited field length {} exceeds 2 GiB limit",
+                data.len()
+            )));
+        }
+        encode_tag(&mut self.buf, field_number, WireType::LengthDelimited);
+        encode_varint32(&mut self.buf, data.len() as u32);
+        self.buf.extend_from_slice(data);
+        Ok(())
+    }
+
+    /// Writes a string field (wire type LengthDelimited).
+    ///
+    /// Returns an error if the string exceeds the 2 GiB proto limit.
+    pub fn write_string(&mut self, field_number: u32, s: &str) -> Result<(), crate::RiegeliError> {
+        self.write_bytes(field_number, s.as_bytes())
+    }
+
+    /// Opens a length-delimited scope for writing a nested submessage.
+    ///
+    /// Writes the tag for the field and saves the current buffer position.
+    /// After writing the submessage contents, call `close_length_delimited()`
+    /// to back-patch the length prefix.
+    pub fn open_length_delimited(&mut self, field_number: u32) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::LengthDelimited);
+        // Save position where the length varint + content will start.
+        self.scope_stack.push(self.buf.len());
+        Ok(())
+    }
+
+    /// Closes the most recently opened length-delimited scope.
+    ///
+    /// Computes the length of the content written since `open_length_delimited`,
+    /// inserts the length varint before the content, and pops the scope stack.
+    ///
+    /// Returns an error if:
+    /// - No scope is currently open.
+    /// - The content exceeds the 2 GiB proto limit.
+    pub fn close_length_delimited(&mut self) -> Result<(), crate::RiegeliError> {
+        let content_start = self.scope_stack.pop().ok_or_else(|| {
+            crate::RiegeliError::MalformedData(
+                "close_length_delimited() called without matching open".to_string(),
+            )
+        })?;
+
+        let content_len = self.buf.len() - content_start;
+        if content_len > MAX_LENGTH_DELIMITED {
+            return Err(crate::RiegeliError::MalformedData(format!(
+                "length-delimited field length {} exceeds 2 GiB limit",
+                content_len
+            )));
+        }
+
+        // Encode the length varint into a temporary buffer, then splice it in.
+        let mut len_varint = Vec::new();
+        encode_varint32(&mut len_varint, content_len as u32);
+
+        // Insert the length varint at content_start, shifting content forward.
+        self.buf
+            .splice(content_start..content_start, len_varint.iter().copied());
+
+        Ok(())
+    }
+
+    // -- Group fields --
+
+    /// Writes a StartGroup tag for the given field number.
+    pub fn write_start_group(&mut self, field_number: u32) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::StartGroup);
+        Ok(())
+    }
+
+    /// Writes an EndGroup tag for the given field number.
+    pub fn write_end_group(&mut self, field_number: u32) -> Result<(), crate::RiegeliError> {
+        encode_tag(&mut self.buf, field_number, WireType::EndGroup);
+        Ok(())
+    }
+}
+
+impl Default for SerializedMessageWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Validates that `data` is a canonical proto binary encoding.
 ///
 /// Returns `true` if:
