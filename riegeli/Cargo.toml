@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "head_to_head"
 harness = false
+
+[[bench]]
+name = "transpose_projection_bench"
+harness = false
