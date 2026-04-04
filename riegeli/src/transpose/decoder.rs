@@ -1831,12 +1831,14 @@ fn write_existence_only_field(
         _ => &[],
     };
 
-    // Write tag + zero value.
+    // Write tag + zero value using a stack buffer (max tag = 5 bytes varint +
+    // max zero = 8 bytes for fixed64 = 13 bytes total).
     let tag_only = &tag_bytes[..tmpl_tag_length.min(tag_bytes.len())];
-    let mut combined = Vec::with_capacity(tag_only.len() + zero_value.len());
-    combined.extend_from_slice(tag_only);
-    combined.extend_from_slice(zero_value);
-    dest.write(&combined);
+    let total = tag_only.len() + zero_value.len();
+    let mut buf = [0u8; 13];
+    buf[..tag_only.len()].copy_from_slice(tag_only);
+    buf[tag_only.len()..total].copy_from_slice(zero_value);
+    dest.write(&buf[..total]);
 
     // Skip the data buffer bytes.
     if let Some(buf_idx) = node.buffer_index {
