@@ -15,7 +15,7 @@
 //! let mut reader = RecordReader::new(file, opts)?;
 //! ```
 
-use crate::proto_wire::{WireType, tag_field_number, tag_wire_type};
+use crate::proto::{WireType, tag_field_number, tag_wire_type};
 use crate::varint::{decode_u32, encode_u32};
 
 /// A proto field path from the root message, represented as a sequence of
@@ -173,7 +173,7 @@ impl FieldProjection {
         if self.is_all() {
             return record.to_vec();
         }
-        if !crate::proto_wire::is_proto_message(record) {
+        if !crate::proto::is_proto_message(record) {
             return record.to_vec();
         }
         apply_projection_inner(record, self)
@@ -401,7 +401,7 @@ fn find_group_end(data: &[u8], pos: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto_wire::make_tag;
+    use crate::proto::make_tag;
 
     fn encode_varint_field(field_number: u32, value: u64) -> Vec<u8> {
         let tag = make_tag(field_number, WireType::Varint);

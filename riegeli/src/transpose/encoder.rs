@@ -28,7 +28,7 @@ use crate::compression::{
     CompressOptions, CompressionType, compress_length_prefixed, compress_with_prefix,
 };
 use crate::error::RiegeliError;
-use crate::proto_wire::{WireType, is_proto_message, tag_field_number, tag_wire_type};
+use crate::proto::{WireType, is_proto_message, tag_field_number, tag_wire_type};
 use crate::simple_chunk::Chunk;
 use crate::transpose::internal::{
     MAX_RECURSION_DEPTH, MAX_VARINT_INLINE, SUBMESSAGE_WIRE_TYPE, has_data_buffer, has_subtype,

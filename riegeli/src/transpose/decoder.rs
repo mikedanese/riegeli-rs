@@ -27,7 +27,7 @@
 use crate::compression::{CompressionType, decompress_with_prefix};
 use crate::error::RiegeliError;
 use crate::field_projection::FieldProjection;
-use crate::proto_wire::{WireType, is_valid_proto_tag, tag_field_number, tag_wire_type};
+use crate::proto::{WireType, is_valid_proto_tag, tag_field_number, tag_wire_type};
 use crate::simple_chunk::Chunk;
 use crate::transpose::internal::{
     SUBMESSAGE_WIRE_TYPE, has_data_buffer, has_subtype, message_id, subtype,

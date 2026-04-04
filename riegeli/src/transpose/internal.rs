@@ -4,7 +4,7 @@
 //! `SUBMESSAGE_WIRE_TYPE` sentinel, and predicates `has_subtype` and
 //! `has_data_buffer` that mirror the C++ `transpose_internal.h`.
 
-use crate::proto_wire::{WireType, tag_wire_type};
+use crate::proto::{WireType, tag_wire_type};
 
 // ---------------------------------------------------------------------------
 // MessageId
@@ -128,7 +128,7 @@ pub const MAX_VARINT_INLINE: u8 = 3;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto_wire::make_tag;
+    use crate::proto::make_tag;
 
     // ---- has_subtype ----
 

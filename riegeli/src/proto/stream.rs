@@ -1,8 +1,8 @@
 //! Streaming proto field processing over riegeli files.
 //!
-//! This module composes the zero-copy field-level APIs from [`proto_wire`] with
-//! the [`RecordReader`] to enable streaming columnar extraction, field filtering,
-//! and handler-driven processing of proto records in riegeli files.
+//! This module composes the zero-copy field-level APIs from the `proto` module
+//! with the [`RecordReader`] to enable streaming columnar extraction, field
+//! filtering, and handler-driven processing of proto records in riegeli files.
 //!
 //! The field-level APIs operate on `&[u8]` record bytes and are **not** coupled
 //! to `RecordReader` internals. This module simply reads records as bytes and
@@ -12,12 +12,13 @@ use std::fmt;
 use std::io::{Read, Seek, Write};
 
 use crate::error::RiegeliError;
-use crate::proto_wire::{
-    FieldValue, HandleField, ProtoFieldIter, SerializedMessageWriter, copy_fields,
-    is_proto_message, read_message,
-};
 use crate::record_reader::RecordReader;
 use crate::record_writer::RecordWriter;
+
+use super::field_iter::{FieldValue, ProtoFieldIter, copy_fields};
+use super::handler::HandleField;
+use super::wire::is_proto_message;
+use super::writer::SerializedMessageWriter;
 
 /// An error that occurred while processing a record stream, annotated with the
 /// record index where the error was encountered.
@@ -87,7 +88,7 @@ where
         };
 
         if is_proto_message(&record) {
-            read_message(&record, handlers).map_err(|e| StreamError {
+            super::handler::read_message(&record, handlers).map_err(|e| StreamError {
                 record_index,
                 source: e,
             })?;
