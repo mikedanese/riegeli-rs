@@ -2,7 +2,7 @@
 //!
 //! These tests probe edge cases the Generator may have missed.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     FieldValue, ProtoField, ProtoFieldIter, WireType, encode_tag, encode_varint32, encode_varint64,
     make_tag, read_canonical_varint64, serialize_field,
 };
@@ -382,7 +382,7 @@ fn adv_end_group_without_start_is_yielded_flat() {
 
 #[test]
 fn adv_make_tag_all_wire_types_all_field_numbers() {
-    use riegeli::proto_wire::{tag_field_number, tag_wire_type};
+    use riegeli::proto::{tag_field_number, tag_wire_type};
 
     let wire_types = [
         WireType::Varint,

@@ -1,6 +1,6 @@
 //! Sprint 28: Field Filtering, Copying, and Composition tests.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     DynamicHandlerSet, FieldHandler, FieldValue, FilteredFieldIter, HandleField, ProtoField,
     ProtoFieldIter, SerializedMessageWriter, StaticHandlerSet, WireType, copy_fields, read_message,
     serialize_field,

@@ -3,7 +3,7 @@
 //! These tests probe edge cases, boundary conditions, and misuse patterns
 //! that the Generator's tests may not cover.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     self, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter, WireType,
 };
 
@@ -13,22 +13,22 @@ use riegeli::proto_wire::{
 
 #[test]
 fn zigzag_i32_min() {
-    assert_eq!(proto_wire::zigzag_encode_i32(i32::MIN), u32::MAX);
+    assert_eq!(proto::zigzag_encode_i32(i32::MIN), u32::MAX);
 }
 
 #[test]
 fn zigzag_i32_max() {
-    assert_eq!(proto_wire::zigzag_encode_i32(i32::MAX), (u32::MAX - 1));
+    assert_eq!(proto::zigzag_encode_i32(i32::MAX), (u32::MAX - 1));
 }
 
 #[test]
 fn zigzag_i64_min() {
-    assert_eq!(proto_wire::zigzag_encode_i64(i64::MIN), u64::MAX);
+    assert_eq!(proto::zigzag_encode_i64(i64::MIN), u64::MAX);
 }
 
 #[test]
 fn zigzag_i64_max() {
-    assert_eq!(proto_wire::zigzag_encode_i64(i64::MAX), u64::MAX - 1);
+    assert_eq!(proto::zigzag_encode_i64(i64::MAX), u64::MAX - 1);
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn sint32_boundary_values_round_trip() {
         assert_eq!(fields[0].wire_type, WireType::Varint);
         // Verify the zigzag value
         if let FieldValue::Varint(v) = fields[0].value {
-            assert_eq!(v, proto_wire::zigzag_encode_i32(value) as u64);
+            assert_eq!(v, proto::zigzag_encode_i32(value) as u64);
         } else {
             panic!("expected Varint");
         }
@@ -62,7 +62,7 @@ fn sint64_boundary_values_round_trip() {
             .unwrap();
         assert_eq!(fields.len(), 1);
         if let FieldValue::Varint(v) = fields[0].value {
-            assert_eq!(v, proto_wire::zigzag_encode_i64(value));
+            assert_eq!(v, proto::zigzag_encode_i64(value));
         } else {
             panic!("expected Varint");
         }
@@ -283,7 +283,7 @@ fn hundred_fields_round_trip() {
     // Re-serialize and verify byte-identity
     let mut rewritten = Vec::new();
     for f in &fields {
-        proto_wire::serialize_field(&mut rewritten, f);
+        proto::serialize_field(&mut rewritten, f);
     }
     assert_eq!(bytes, rewritten);
 }
@@ -413,7 +413,7 @@ fn full_round_trip_identity() {
     // Re-serialize
     let mut rewritten = Vec::new();
     for f in &fields {
-        proto_wire::serialize_field(&mut rewritten, f);
+        proto::serialize_field(&mut rewritten, f);
     }
 
     assert_eq!(bytes, rewritten, "round-trip must be byte-identical");
@@ -439,7 +439,7 @@ fn complex_message_passes_is_proto_message() {
     w.write_start_group(8).unwrap();
     w.write_end_group(8).unwrap();
     let bytes = w.finish().unwrap();
-    assert!(proto_wire::is_proto_message(&bytes));
+    assert!(proto::is_proto_message(&bytes));
 }
 
 // ===========================================================================
@@ -457,7 +457,7 @@ fn deeply_nested_10_levels() {
         w.close_length_delimited().unwrap();
     }
     let bytes = w.finish().unwrap();
-    assert!(proto_wire::is_proto_message(&bytes));
+    assert!(proto::is_proto_message(&bytes));
 
     // Drill down 10 levels
     let mut data: &[u8] = &bytes;
@@ -611,7 +611,7 @@ fn field_number_zero_produces_invalid_proto() {
     w.write_uint64(0, 1).unwrap();
     let bytes = w.finish().unwrap();
     // tag = (0 << 3) | 0 = 0, which is not a valid proto tag
-    assert!(!proto_wire::is_proto_message(&bytes));
+    assert!(!proto::is_proto_message(&bytes));
 }
 
 // ===========================================================================

@@ -1,6 +1,6 @@
 //! Sprint 28 Evaluator adversarial tests: field filtering, copying, composition.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     FieldHandler, FieldValue, FilteredFieldIter, HandleField, ProtoField, ProtoFieldIter,
     SerializedMessageWriter, StaticHandlerSet, WireType, copy_fields, read_message,
 };

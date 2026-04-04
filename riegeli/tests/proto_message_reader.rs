@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 
 use riegeli::RiegeliError;
-use riegeli::proto_wire::{
+use riegeli::proto::{
     DynamicHandlerSet, EmptyHandlerSet, FieldHandler, SerializedMessageWriter, StaticHandlerSet,
     read_message,
 };

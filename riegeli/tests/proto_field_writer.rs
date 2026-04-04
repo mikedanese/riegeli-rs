@@ -1,6 +1,6 @@
 //! Tests for Sprint 26: SerializedMessageWriter.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     self, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter, WireType,
 };
 
@@ -95,16 +95,16 @@ fn sint64_zigzag_encoding() {
 
 #[test]
 fn zigzag_encode_helpers() {
-    assert_eq!(proto_wire::zigzag_encode_i32(0), 0);
-    assert_eq!(proto_wire::zigzag_encode_i32(-1), 1);
-    assert_eq!(proto_wire::zigzag_encode_i32(1), 2);
-    assert_eq!(proto_wire::zigzag_encode_i32(-2), 3);
-    assert_eq!(proto_wire::zigzag_encode_i32(2147483647), 4294967294);
-    assert_eq!(proto_wire::zigzag_encode_i32(-2147483648), 4294967295);
+    assert_eq!(proto::zigzag_encode_i32(0), 0);
+    assert_eq!(proto::zigzag_encode_i32(-1), 1);
+    assert_eq!(proto::zigzag_encode_i32(1), 2);
+    assert_eq!(proto::zigzag_encode_i32(-2), 3);
+    assert_eq!(proto::zigzag_encode_i32(2147483647), 4294967294);
+    assert_eq!(proto::zigzag_encode_i32(-2147483648), 4294967295);
 
-    assert_eq!(proto_wire::zigzag_encode_i64(0), 0);
-    assert_eq!(proto_wire::zigzag_encode_i64(-1), 1);
-    assert_eq!(proto_wire::zigzag_encode_i64(1), 2);
+    assert_eq!(proto::zigzag_encode_i64(0), 0);
+    assert_eq!(proto::zigzag_encode_i64(-1), 1);
+    assert_eq!(proto::zigzag_encode_i64(1), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ fn criterion_26_6_round_trip_all_field_types() {
     // Re-serialize
     let mut rewritten = Vec::new();
     for f in &fields {
-        proto_wire::serialize_field(&mut rewritten, f);
+        proto::serialize_field(&mut rewritten, f);
     }
 
     // Byte-identical
@@ -385,7 +385,7 @@ fn nested_groups() {
     let bytes = w.finish().unwrap();
 
     // Verify it's a valid proto message
-    assert!(proto_wire::is_proto_message(&bytes));
+    assert!(proto::is_proto_message(&bytes));
 
     let fields: Vec<_> = ProtoFieldIter::new(&bytes)
         .collect::<Result<_, _>>()
@@ -499,7 +499,7 @@ fn writer_output_is_valid_proto_message() {
     w.write_end_group(6).unwrap();
     let bytes = w.finish().unwrap();
 
-    assert!(proto_wire::is_proto_message(&bytes));
+    assert!(proto::is_proto_message(&bytes));
 }
 
 #[test]
@@ -537,7 +537,7 @@ fn three_level_nesting() {
     w.close_length_delimited().unwrap();
     let bytes = w.finish().unwrap();
 
-    assert!(proto_wire::is_proto_message(&bytes));
+    assert!(proto::is_proto_message(&bytes));
 
     // Verify structure by iterating
     let outer: Vec<_> = ProtoFieldIter::new(&bytes)

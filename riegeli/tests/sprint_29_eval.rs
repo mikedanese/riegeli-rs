@@ -8,11 +8,11 @@ mod common;
 use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 
-use riegeli::proto_stream::{
-    StreamError, extract_varint_column, filter_fields_to_writer, for_each_proto_record,
-};
-use riegeli::proto_wire::{
+use riegeli::proto::{
     DynamicHandlerSet, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter,
+};
+use riegeli::proto::{
+    StreamError, extract_varint_column, filter_fields_to_writer, for_each_proto_record,
 };
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, WriterOptions};
 use riegeli_ffi::{

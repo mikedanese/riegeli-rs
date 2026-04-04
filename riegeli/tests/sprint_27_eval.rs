@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use riegeli::RiegeliError;
-use riegeli::proto_wire::{
+use riegeli::proto::{
     DynamicHandlerSet, EmptyHandlerSet, FieldHandler, HandleField, ProtoField,
     SerializedMessageWriter, StaticHandlerSet, WireType, make_tag, read_message,
 };
@@ -307,14 +307,14 @@ fn adv_all_fields_unhandled() {
 #[test]
 fn adv_group_handlers() {
     // Manually construct a message with StartGroup field 1, varint field 2 inside, EndGroup field 1.
-    use riegeli::proto_wire::encode_varint32;
+    use riegeli::proto::encode_varint32;
 
     let mut data = Vec::new();
     // StartGroup for field 1: tag = (1 << 3) | 3 = 0x0B
     encode_varint32(&mut data, make_tag(1, WireType::StartGroup));
     // Varint field 2 = 42 inside the group
     encode_varint32(&mut data, make_tag(2, WireType::Varint));
-    riegeli::proto_wire::encode_varint64(&mut data, 42);
+    riegeli::proto::encode_varint64(&mut data, 42);
     // EndGroup for field 1: tag = (1 << 3) | 4 = 0x0C
     encode_varint32(&mut data, make_tag(1, WireType::EndGroup));
 
@@ -440,7 +440,7 @@ fn adv_dynamic_handler_replacement() {
 
 #[test]
 fn adv_empty_handler_set_complex_message() {
-    use riegeli::proto_wire::encode_varint32;
+    use riegeli::proto::encode_varint32;
 
     let mut w = SerializedMessageWriter::new();
     w.write_uint64(1, u64::MAX).unwrap();

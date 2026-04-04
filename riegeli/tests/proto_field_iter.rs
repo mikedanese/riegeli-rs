@@ -1,6 +1,6 @@
 //! Sprint 25 tests: Proto field iterator and public wire helpers.
 
-use riegeli::proto_wire::{
+use riegeli::proto::{
     FieldValue, ProtoField, ProtoFieldIter, WireType, encode_tag, encode_varint32, encode_varint64,
     make_tag, serialize_field,
 };
@@ -367,7 +367,7 @@ fn criterion_25_7_nested_groups_round_trip() {
 
 #[test]
 fn test_read_varint64_basic() {
-    use riegeli::proto_wire::read_canonical_varint64;
+    use riegeli::proto::read_canonical_varint64;
 
     // Single byte: value 0
     assert_eq!(read_canonical_varint64(&[0x00], 0), Some((0, 1)));
