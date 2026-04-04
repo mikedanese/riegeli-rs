@@ -68,6 +68,13 @@ enum CallbackType {
     /// Read a varint32 length and then that many bytes from a data buffer,
     /// and prepend the tag + length-varint + data.
     StringField,
+    /// Existence-only: write tag + zero value, skip data buffer.
+    /// The zero value depends on the wire type:
+    /// - Varint: single 0x00 byte
+    /// - Fixed32: 4 zero bytes
+    /// - Fixed64: 8 zero bytes
+    /// - LengthDelimited: 0x00 (zero-length)
+    ExistenceOnly,
     /// Sentinel node indicating an invalid/unreachable state.
     Failure,
     /// Deferred-resolution callback: at execution time, the node's concrete
@@ -88,12 +95,7 @@ enum CallbackType {
 // Projection-aware types for deferred callback resolution
 // ---------------------------------------------------------------------------
 
-// These types are infrastructure for sprint 32's projection-during-decode.
-// They are exercised by unit tests in this sprint but not yet used in the
-// main decode loop, hence the allow(dead_code).
-
 /// How a field should be included in projected output.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldIncluded {
     /// Include the field fully (tag + value from buffer).
@@ -105,7 +107,6 @@ enum FieldIncluded {
 }
 
 /// How a node in the include-field tree contributes to projection.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum IncludeType {
     /// Include the field and all its children fully.
@@ -117,7 +118,6 @@ enum IncludeType {
 }
 
 /// An entry in the include-field map.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct IncludedField {
     /// Sequential ID assigned to this field (used as parent_id for children).
@@ -133,7 +133,6 @@ const INVALID_POS: u32 = u32::MAX;
 ///
 /// Maps `(parent_field_id, field_number)` to `IncludedField`. The root
 /// parent ID is `INVALID_POS`. This mirrors C++'s `Context::include_fields`.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct IncludeFieldMap {
     map: std::collections::HashMap<(u32, u32), IncludedField>,
@@ -191,7 +190,6 @@ impl IncludeFieldMap {
 
 /// Template data stored for a `SelectCallback` node, holding the information
 /// needed to resolve the concrete callback type at execution time.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct NodeTemplate {
     /// The proto tag (with submessage wire type already mapped to LengthDelimited).
@@ -561,22 +559,10 @@ impl TransposeChunkDecoder {
             include_map.as_ref(),
         )?;
 
-        // Apply field projection post-decode if active: iterate record slices,
-        // project each, and rebuild a new contiguous buffer with updated limits.
-        let (data, limits) = if let Some(proj) = active_projection {
-            let mut proj_data: Vec<u8> = Vec::with_capacity(decoded_data.len());
-            let mut proj_limits: Vec<usize> = Vec::with_capacity(limits.len());
-            let mut prev = 0usize;
-            for end in limits {
-                let projected = proj.apply(&decoded_data[prev..end]);
-                proj_data.extend_from_slice(&projected);
-                proj_limits.push(proj_data.len());
-                prev = end;
-            }
-            (proj_data, proj_limits)
-        } else {
-            (decoded_data, limits)
-        };
+        // When projection-during-decode is active (include_map was Some), the
+        // decoded data is already narrow — no post-processing apply() needed.
+        // The apply() fallback is only used for non-transpose code paths.
+        let (data, limits) = (decoded_data, limits);
 
         Ok(Self {
             data,
@@ -1324,7 +1310,6 @@ impl TransposeChunkDecoder {
 
 /// Resolve a `SelectCallback` node to its concrete callback type by walking
 /// the submessage stack against the include-field map.
-#[allow(dead_code)]
 ///
 /// This mirrors C++ `TransposeDecoder::SetCallbackType`. For
 /// `StartOfSubmessage` nodes, resolves to `SubmessageStart` or
@@ -1414,7 +1399,6 @@ fn resolve_select_callback(
 
 /// Map a `FieldIncluded` classification to the concrete `CallbackType` for
 /// a proto field node with the given tag and subtype.
-#[allow(dead_code)]
 fn callback_for_field_included(
     field_included: FieldIncluded,
     tag: u32,
@@ -1449,11 +1433,18 @@ fn callback_for_field_included(
             }
         }
         FieldIncluded::ExistenceOnly => {
-            // Existence-only: emit tag + zero value.
-            // For this sprint, we treat it the same as included (the apply()
-            // fallback handles existence-only rewriting). Sprint 33 will
-            // produce zero values directly.
-            TransposeChunkDecoder::callback_for_wire_type(wt, st)
+            // Existence-only: emit tag + zero value, skip data buffer.
+            // For submessage end nodes, produce a SkippedSubmessageEnd since
+            // existence-only on a submessage means "include the tag but not
+            // the contents" — the submessage is effectively skipped.
+            match wt {
+                Some(WireType::LengthDelimited)
+                    if st == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE =>
+                {
+                    Ok(CallbackType::SkippedSubmessageEnd)
+                }
+                _ => Ok(CallbackType::ExistenceOnly),
+            }
         }
     }
 }
@@ -1480,39 +1471,70 @@ struct DecodeState<'a> {
 /// SubmessageStart/End), data fields (Varint, Fixed32, Fixed64, StringField,
 /// CopyTag), non-proto records, and projection-aware variants (SelectCallback,
 /// SkippedSubmessageStart, SkippedSubmessageEnd).
+///
+/// When projection-during-decode is active (include_map is Some), SelectCallback
+/// nodes are resolved via `resolve_select_callback` to determine the concrete
+/// callback. Excluded fields resolve to NoOp (with buffer data skipped),
+/// excluded submessages use SkippedSubmessageEnd/Start to track nesting depth
+/// without producing output.
 fn execute_node_action(
     node: &StateMachineNode,
     current_node_idx: usize,
     nodes: &[StateMachineNode],
     state: &mut DecodeState<'_>,
 ) -> Result<(), RiegeliError> {
-    // For SelectCallback, resolve to the non-projection equivalent callback.
-    // In this sprint (31), the resolve logic exists but the decode loop still
-    // produces full records — the post-decode apply() fallback handles
-    // projection. The SelectCallback is resolved to the *included* callback
-    // type so the decode output is identical to the non-projection path.
-    // Sprint 32 will wire in the actual projection-during-decode behavior.
+    // For SelectCallback, resolve to the concrete callback type using the
+    // projection's include-field map and current submessage stack state.
     let effective_callback = if node.callback_type == CallbackType::SelectCallback {
-        let tmpl_idx = node
-            .node_template_index
-            .ok_or_else(|| RiegeliError::MalformedData("SelectCallback missing template".into()))?;
-        let tmpl = &state.node_templates[tmpl_idx];
-        if tmpl.tag == message_id::START_OF_SUBMESSAGE {
-            CallbackType::SubmessageStart
+        if let Some(include_map) = state.include_map {
+            resolve_select_callback(
+                node,
+                state.node_templates,
+                include_map,
+                state.submessage_stack,
+                nodes,
+                state.skipped_submessage_level,
+            )?
         } else {
-            TransposeChunkDecoder::callback_for_wire_type(tag_wire_type(tmpl.tag), tmpl.subtype)?
+            // No projection active but SelectCallback present — should not
+            // happen, but resolve to included as a safe fallback.
+            let tmpl_idx = node.node_template_index.ok_or_else(|| {
+                RiegeliError::MalformedData("SelectCallback missing template".into())
+            })?;
+            let tmpl = &state.node_templates[tmpl_idx];
+            if tmpl.tag == message_id::START_OF_SUBMESSAGE {
+                CallbackType::SubmessageStart
+            } else {
+                TransposeChunkDecoder::callback_for_wire_type(
+                    tag_wire_type(tmpl.tag),
+                    tmpl.subtype,
+                )?
+            }
         }
     } else {
         node.callback_type
     };
 
     match effective_callback {
-        CallbackType::NoOp => {}
+        CallbackType::NoOp => {
+            // When a field is excluded by projection, it resolves to NoOp.
+            // If the node has a data buffer, we must consume (skip) the buffer
+            // bytes to keep the buffer cursor in sync, without writing output.
+            if let Some(buf_idx) = node.buffer_index {
+                skip_field_data(node, state.buffers, buf_idx, state.node_templates)?;
+            }
+        }
         CallbackType::MessageStart => {
             if !state.submessage_stack.is_empty() {
                 return Err(RiegeliError::MalformedData(
                     "submessages still open at record boundary".into(),
                 ));
+            }
+            if state.skipped_submessage_level != 0 {
+                return Err(RiegeliError::MalformedData(format!(
+                    "skipped_submessage_level is {} at record boundary, expected 0",
+                    state.skipped_submessage_level
+                )));
             }
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
@@ -1546,22 +1568,22 @@ fn execute_node_action(
         CallbackType::StringField => {
             write_string_field(node, state.dest, state.buffers)?;
         }
+        CallbackType::ExistenceOnly => {
+            // Write tag + zero value, skip data buffer bytes.
+            write_existence_only_field(node, state.dest, state.buffers, state.node_templates)?;
+        }
         CallbackType::Failure => {
             return Err(RiegeliError::MalformedData(
                 "hit failure node in state machine".into(),
             ));
         }
-        // Projection-aware variants: in this sprint, these dispatch to their
-        // non-projection equivalents since apply() fallback is still active.
-        // SkippedSubmessageEnd behaves like SubmessageEnd for now.
+        // Projection-aware: excluded submessage end — increment skip level,
+        // no stack push, no output bytes.
         CallbackType::SkippedSubmessageEnd => {
-            state.submessage_stack.push(SubmessageFrame {
-                end_pos: state.dest.pos(),
-                node_index: current_node_idx,
-            });
             state.skipped_submessage_level += 1;
         }
-        // SkippedSubmessageStart behaves like SubmessageStart for now.
+        // Projection-aware: excluded submessage start — decrement skip level,
+        // no stack pop, no output bytes.
         CallbackType::SkippedSubmessageStart => {
             if state.skipped_submessage_level <= 0 {
                 return Err(RiegeliError::MalformedData(
@@ -1569,13 +1591,77 @@ fn execute_node_action(
                 ));
             }
             state.skipped_submessage_level -= 1;
-            write_submessage_header(state.dest, nodes, state.submessage_stack)?;
         }
         // SelectCallback should have been resolved above.
         CallbackType::SelectCallback => {
             return Err(RiegeliError::MalformedData(
                 "unresolved SelectCallback in decode loop".into(),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Skip (consume) the data buffer bytes for an excluded field without writing
+/// any output. This keeps the buffer cursor in sync when a field is excluded
+/// by projection.
+///
+/// The skip logic must match what the corresponding write function would read:
+/// - Varint: skip `data_length` bytes (from tag_data_size - tag_length, or from template)
+/// - Fixed32: skip 4 bytes
+/// - Fixed64: skip 8 bytes
+/// - StringField: read varint32 length, skip that many bytes
+/// - CopyTag (inline varint): no data buffer bytes to skip
+///
+/// Uses the node's `NodeTemplate` to determine the original wire type and
+/// subtype, then skips the appropriate number of bytes:
+/// - Varint (non-inline): skip `subtype + 1` bytes
+/// - Inline varint: no buffer data to skip (data is in tag_data)
+/// - Fixed32: skip 4 bytes
+/// - Fixed64: skip 8 bytes
+/// - StringField: read varint32 length, skip that many bytes
+fn skip_field_data(
+    node: &StateMachineNode,
+    buffers: &mut [BufferCursor],
+    buf_idx: usize,
+    node_templates: &[NodeTemplate],
+) -> Result<(), RiegeliError> {
+    // Use the node template for tag and subtype when available.
+    let (tag, st) = if let Some(tmpl_idx) = node.node_template_index {
+        let tmpl = &node_templates[tmpl_idx];
+        (tmpl.tag, tmpl.subtype)
+    } else if !node.tag_data.is_empty() {
+        let (tag, _) = decode_u32(&node.tag_data)
+            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag for skip: {e}")))?;
+        (tag, 0u8)
+    } else {
+        return Ok(());
+    };
+
+    let wt = tag_wire_type(tag);
+    match wt {
+        Some(WireType::Varint) => {
+            if st >= subtype::VARINT_INLINE_0 {
+                // Inline varint — data is stored in tag_data, no buffer read.
+                return Ok(());
+            }
+            // Non-inline varint: data_length = subtype + 1.
+            let data_length = (st + 1) as usize;
+            buffers[buf_idx].read_exact(data_length)?;
+        }
+        Some(WireType::Fixed32) => {
+            buffers[buf_idx].read_exact(4)?;
+        }
+        Some(WireType::Fixed64) => {
+            buffers[buf_idx].read_exact(8)?;
+        }
+        Some(WireType::LengthDelimited) => {
+            // String field: read length varint, skip that many data bytes.
+            let str_len = buffers[buf_idx].read_varint32()? as usize;
+            buffers[buf_idx].read_exact(str_len)?;
+        }
+        _ => {
+            // StartGroup/EndGroup or unknown — no data to skip.
         }
     }
     Ok(())
@@ -1698,6 +1784,64 @@ fn write_string_field(
     combined.extend_from_slice(&len_varint);
     combined.extend_from_slice(&str_data);
     dest.write(&combined);
+    Ok(())
+}
+
+/// Write an existence-only field: tag + zero value to the backward buffer,
+/// then skip (consume) the data buffer bytes without using them.
+///
+/// The zero value depends on the wire type:
+/// - Varint: single 0x00 byte
+/// - Fixed32: 4 zero bytes
+/// - Fixed64: 8 zero bytes
+/// - LengthDelimited (string): 0x00 (zero-length)
+fn write_existence_only_field(
+    node: &StateMachineNode,
+    dest: &mut BackwardBuffer,
+    buffers: &mut [BufferCursor],
+    node_templates: &[NodeTemplate],
+) -> Result<(), RiegeliError> {
+    // Get the tag and subtype from the template.
+    let (tag, st) = if let Some(tmpl_idx) = node.node_template_index {
+        let tmpl = &node_templates[tmpl_idx];
+        (tmpl.tag, tmpl.subtype)
+    } else if !node.tag_data.is_empty() {
+        let (tag, _) = decode_u32(&node.tag_data)
+            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag: {e}")))?;
+        (tag, 0u8)
+    } else {
+        return Ok(());
+    };
+
+    let tag_bytes = &node.tag_data[..node.tag_data_size.min(node.tag_data.len())];
+    // For inline varints, tag_data already includes the value byte.
+    // We need just the tag portion.
+    let tmpl_tag_length = if let Some(tmpl_idx) = node.node_template_index {
+        node_templates[tmpl_idx].tag_length
+    } else {
+        encode_u32(tag).len()
+    };
+
+    let wt = tag_wire_type(tag);
+    let zero_value: &[u8] = match wt {
+        Some(WireType::Varint) => &[0x00],
+        Some(WireType::Fixed32) => &[0x00, 0x00, 0x00, 0x00],
+        Some(WireType::Fixed64) => &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        Some(WireType::LengthDelimited) => &[0x00], // zero-length
+        _ => &[],
+    };
+
+    // Write tag + zero value.
+    let tag_only = &tag_bytes[..tmpl_tag_length.min(tag_bytes.len())];
+    let mut combined = Vec::with_capacity(tag_only.len() + zero_value.len());
+    combined.extend_from_slice(tag_only);
+    combined.extend_from_slice(zero_value);
+    dest.write(&combined);
+
+    // Skip the data buffer bytes.
+    if let Some(buf_idx) = node.buffer_index {
+        skip_field_data(node, buffers, buf_idx, node_templates)?;
+    }
     Ok(())
 }
 
