@@ -18,6 +18,7 @@ pub(crate) mod block_header;
 pub(crate) mod chunk_header;
 pub(crate) mod constants;
 pub(crate) mod hash;
+pub mod proto_stream;
 pub mod proto_wire;
 pub(crate) mod simple_chunk;
 pub(crate) mod transpose;
