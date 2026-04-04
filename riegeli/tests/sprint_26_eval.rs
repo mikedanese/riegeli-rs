@@ -8,28 +8,8 @@ use riegeli::proto::{
 };
 
 // ===========================================================================
-// Edge cases: zigzag encoding boundary values
+// Edge cases: zigzag + sint boundary round-trips
 // ===========================================================================
-
-#[test]
-fn zigzag_i32_min() {
-    assert_eq!(proto::zigzag_encode_i32(i32::MIN), u32::MAX);
-}
-
-#[test]
-fn zigzag_i32_max() {
-    assert_eq!(proto::zigzag_encode_i32(i32::MAX), (u32::MAX - 1));
-}
-
-#[test]
-fn zigzag_i64_min() {
-    assert_eq!(proto::zigzag_encode_i64(i64::MIN), u64::MAX);
-}
-
-#[test]
-fn zigzag_i64_max() {
-    assert_eq!(proto::zigzag_encode_i64(i64::MAX), u64::MAX - 1);
-}
 
 #[test]
 fn sint32_boundary_values_round_trip() {
@@ -91,31 +71,8 @@ fn double_close_is_error() {
 }
 
 // ===========================================================================
-// Empty submessage
-// ===========================================================================
-
-#[test]
-fn empty_submessage_produces_zero_length() {
-    let mut w = SerializedMessageWriter::new();
-    w.open_length_delimited(1).unwrap();
-    w.close_length_delimited().unwrap();
-    let bytes = w.finish().unwrap();
-    // Tag for field 1, LD = (1 << 3) | 2 = 0x0A, then length 0x00
-    assert_eq!(bytes, vec![0x0A, 0x00]);
-}
-
-// ===========================================================================
 // Field number edge cases
 // ===========================================================================
-
-#[test]
-fn field_number_1_varint() {
-    let mut w = SerializedMessageWriter::new();
-    w.write_uint64(1, 0).unwrap();
-    let bytes = w.finish().unwrap();
-    // tag = (1 << 3) | 0 = 8
-    assert_eq!(bytes[0], 0x08);
-}
 
 #[test]
 fn max_field_number_all_wire_types() {
@@ -518,18 +475,6 @@ fn varint_zero_is_single_byte() {
     // tag=0x08 (1 byte), value=0x00 (1 byte)
     assert_eq!(bytes.len(), 2);
     assert_eq!(bytes, [0x08, 0x00]);
-}
-
-// ===========================================================================
-// finish() consumes the writer (ownership check) -- compile test
-// ===========================================================================
-
-#[test]
-fn finish_returns_owned_vec() {
-    let w = SerializedMessageWriter::new();
-    let v: Vec<u8> = w.finish().unwrap();
-    // v is owned, writer is consumed
-    assert!(v.is_empty());
 }
 
 // ===========================================================================

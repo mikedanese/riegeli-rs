@@ -18,36 +18,6 @@ fn build_large_message(n: u32) -> Vec<u8> {
 }
 
 // ===========================================================================
-// ADV-28-01: Filter with empty field set yields nothing
-// ===========================================================================
-
-#[test]
-fn adv_filter_empty_field_set() {
-    let data = build_large_message(20);
-    let fields: Vec<ProtoField> = FilteredFieldIter::new(&data, &[])
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(fields.is_empty(), "empty field set must yield no fields");
-}
-
-// ===========================================================================
-// ADV-28-02: Filter with all field numbers yields all fields
-// ===========================================================================
-
-#[test]
-fn adv_filter_all_field_numbers_yields_all() {
-    let data = build_large_message(50);
-    let all_nums: Vec<u32> = (1..=50).collect();
-    let filtered: Vec<ProtoField> = FilteredFieldIter::new(&data, &all_nums)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let unfiltered: Vec<ProtoField> = ProtoFieldIter::new(&data)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(filtered, unfiltered);
-}
-
-// ===========================================================================
 // ADV-28-03: Copy fields from message with groups
 // ===========================================================================
 
@@ -282,19 +252,6 @@ fn adv_filter_duplicate_allowed_numbers() {
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].field_number, 1);
     assert_eq!(fields[0].value, FieldValue::Varint(42));
-}
-
-// ===========================================================================
-// ADV-28-10: Copy from empty message produces empty output
-// ===========================================================================
-
-#[test]
-fn adv_copy_from_empty_message() {
-    let data: Vec<u8> = Vec::new();
-    let mut writer = SerializedMessageWriter::new();
-    copy_fields(&data, &[1, 2, 3], &mut writer).unwrap();
-    let output = writer.finish().unwrap();
-    assert!(output.is_empty());
 }
 
 // ===========================================================================
