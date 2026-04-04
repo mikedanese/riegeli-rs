@@ -659,12 +659,82 @@ impl TransposeChunkDecoder {
         Ok((bucket_compressed_data, pos))
     }
 
-    /// Decompress buckets into per-buffer cursors, pruning buffers not in
-    /// `needed_buffers`.
+    /// Read the decompressed size of a bucket without actually decompressing it.
     ///
-    /// Decompresses each bucket once. Buffers whose index is `false` in
-    /// `needed_buffers` get a `BufferCursor::pruned()` stub that returns
-    /// zero bytes on reads, instead of real data.
+    /// For `CompressionType::None`, the compressed data *is* the decompressed
+    /// data, so the size is just the length. For compressed types, the bucket
+    /// uses `EncodeAndClose` format with a varint64 prefix giving the
+    /// uncompressed size.
+    fn bucket_decompressed_size(
+        compressed: &[u8],
+        compression_type: CompressionType,
+    ) -> Result<usize, RiegeliError> {
+        if compression_type == CompressionType::None {
+            return Ok(compressed.len());
+        }
+        let (size, _consumed) = decode_u64(compressed).map_err(|e| {
+            RiegeliError::MalformedData(format!("reading bucket uncompressed_size prefix: {e}"))
+        })?;
+        Ok(size as usize)
+    }
+
+    /// Compute the mapping from buffer indices to bucket indices.
+    ///
+    /// Returns a `Vec<usize>` where `result[buffer_i]` is the bucket index
+    /// that contains buffer `buffer_i`. The mapping is derived by summing
+    /// buffer uncompressed sizes and comparing against bucket decompressed
+    /// sizes.
+    fn compute_buffer_to_bucket(
+        bucket_compressed_data: &[Vec<u8>],
+        buffer_uncompressed_sizes: &[usize],
+        compression_type: CompressionType,
+    ) -> Result<Vec<usize>, RiegeliError> {
+        let num_buckets = bucket_compressed_data.len();
+        let num_buffers = buffer_uncompressed_sizes.len();
+        let mut buffer_to_bucket = Vec::with_capacity(num_buffers);
+
+        if num_buckets == 0 || num_buffers == 0 {
+            return Ok(buffer_to_bucket);
+        }
+
+        // Compute decompressed size of each bucket (without decompressing).
+        let mut bucket_decompressed_sizes = Vec::with_capacity(num_buckets);
+        for compressed in bucket_compressed_data {
+            bucket_decompressed_sizes.push(Self::bucket_decompressed_size(
+                compressed,
+                compression_type,
+            )?);
+        }
+
+        let mut bucket_index: usize = 0;
+        let mut bucket_remaining: usize = bucket_decompressed_sizes[0];
+
+        for (i, &buf_size) in buffer_uncompressed_sizes.iter().enumerate() {
+            // Advance to next bucket if current one is exhausted.
+            while bucket_remaining == 0 && bucket_index + 1 < num_buckets {
+                bucket_index += 1;
+                bucket_remaining = bucket_decompressed_sizes[bucket_index];
+            }
+            if buf_size > bucket_remaining {
+                return Err(RiegeliError::MalformedData(format!(
+                    "buffer {} (size {}) exceeds remaining bucket {} capacity ({})",
+                    i, buf_size, bucket_index, bucket_remaining
+                )));
+            }
+            buffer_to_bucket.push(bucket_index);
+            bucket_remaining -= buf_size;
+        }
+
+        Ok(buffer_to_bucket)
+    }
+
+    /// Decompress buckets into per-buffer cursors with lazy bucket
+    /// decompression, pruning buffers not in `needed_buffers`.
+    ///
+    /// Only decompresses buckets that contain at least one needed buffer.
+    /// Buckets with zero needed buffers are never passed to the decompression
+    /// codec. Buffers whose index is `false` in `needed_buffers` get a
+    /// `BufferCursor::pruned()` stub that returns zero bytes on reads.
     fn decompress_into_buffers_with_pruning(
         bucket_compressed_data: &[Vec<u8>],
         buffer_uncompressed_sizes: &[usize],
@@ -673,47 +743,73 @@ impl TransposeChunkDecoder {
     ) -> Result<Vec<BufferCursor>, RiegeliError> {
         let num_buckets = bucket_compressed_data.len();
         let num_buffers = buffer_uncompressed_sizes.len();
-        let mut buffers: Vec<BufferCursor> = Vec::with_capacity(num_buffers);
-        let mut bucket_index: usize = 0;
-        let mut bucket_decompressed: Vec<u8> = Vec::new();
-        let mut bucket_pos: usize = 0;
 
-        if num_buckets > 0 && num_buffers > 0 {
-            // Buckets use EncodeAndClose format (varint prefix for compressed types).
-            bucket_decompressed =
-                decompress_with_prefix(&bucket_compressed_data[0], compression_type)?;
+        if num_buckets == 0 || num_buffers == 0 {
+            return Ok(Vec::new());
         }
 
+        // Step 1: Compute which buffer belongs to which bucket.
+        let buffer_to_bucket = Self::compute_buffer_to_bucket(
+            bucket_compressed_data,
+            buffer_uncompressed_sizes,
+            compression_type,
+        )?;
+
+        // Step 2: Determine which buckets need decompression.
+        let mut bucket_needed = vec![false; num_buckets];
+        for (i, &needed) in needed_buffers.iter().enumerate() {
+            if needed {
+                if let Some(&bi) = buffer_to_bucket.get(i) {
+                    bucket_needed[bi] = true;
+                }
+            }
+        }
+
+        // Step 3: Decompress only needed buckets (lazy at bucket level).
+        let mut bucket_decompressed: Vec<Option<Vec<u8>>> = Vec::with_capacity(num_buckets);
+        for (bi, compressed) in bucket_compressed_data.iter().enumerate() {
+            if bucket_needed[bi] {
+                let decompressed = decompress_with_prefix(compressed, compression_type)?;
+                bucket_decompressed.push(Some(decompressed));
+            } else {
+                bucket_decompressed.push(None);
+            }
+        }
+
+        // Step 4: Extract individual buffers from decompressed bucket data.
+        let mut buffers: Vec<BufferCursor> = Vec::with_capacity(num_buffers);
+        // Track the current offset within each bucket's decompressed data.
+        let mut bucket_offsets = vec![0usize; num_buckets];
+
         for (i, &buf_size) in buffer_uncompressed_sizes.iter().enumerate() {
-            while bucket_pos >= bucket_decompressed.len() && bucket_index + 1 < num_buckets {
-                bucket_index += 1;
-                bucket_decompressed = decompress_with_prefix(
-                    &bucket_compressed_data[bucket_index],
-                    compression_type,
-                )?;
-                bucket_pos = 0;
-            }
-            let end = bucket_pos + buf_size;
-            if end > bucket_decompressed.len() {
-                return Err(RiegeliError::MalformedData(format!(
-                    "buffer {} (size {}) exceeds bucket {} data (len {})",
-                    i,
-                    buf_size,
-                    bucket_index,
-                    bucket_decompressed.len()
-                )));
-            }
+            let bi = buffer_to_bucket[i];
+            let offset = bucket_offsets[bi];
 
             let is_needed = needed_buffers.get(i).copied().unwrap_or(true);
             if is_needed {
-                buffers.push(BufferCursor::new(
-                    bucket_decompressed[bucket_pos..end].to_vec(),
-                ));
+                let decompressed = bucket_decompressed[bi].as_ref().ok_or_else(|| {
+                    RiegeliError::MalformedData(format!(
+                        "needed buffer {} in undecompressed bucket {}",
+                        i, bi
+                    ))
+                })?;
+                let end = offset + buf_size;
+                if end > decompressed.len() {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "buffer {} (size {}) exceeds bucket {} data (len {})",
+                        i,
+                        buf_size,
+                        bi,
+                        decompressed.len()
+                    )));
+                }
+                buffers.push(BufferCursor::new(decompressed[offset..end].to_vec()));
             } else {
                 buffers.push(BufferCursor::pruned());
             }
-            bucket_pos = end;
+            bucket_offsets[bi] = offset + buf_size;
         }
+
         Ok(buffers)
     }
 
