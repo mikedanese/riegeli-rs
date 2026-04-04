@@ -70,6 +70,136 @@ enum CallbackType {
     StringField,
     /// Sentinel node indicating an invalid/unreachable state.
     Failure,
+    /// Deferred-resolution callback: at execution time, the node's concrete
+    /// callback type is resolved by walking the submessage stack against the
+    /// projection's include-field map. Used only when a `FieldProjection` is
+    /// active. The node's `node_template_index` identifies the `NodeTemplate`
+    /// holding the raw tag, subtype, and tag_length for resolution.
+    SelectCallback,
+    /// A submessage-end node for an excluded submessage: increments
+    /// `skipped_submessage_level` instead of pushing a frame onto the stack.
+    SkippedSubmessageEnd,
+    /// A submessage-start node for an excluded submessage: decrements
+    /// `skipped_submessage_level` instead of popping and writing a header.
+    SkippedSubmessageStart,
+}
+
+// ---------------------------------------------------------------------------
+// Projection-aware types for deferred callback resolution
+// ---------------------------------------------------------------------------
+
+// These types are infrastructure for sprint 32's projection-during-decode.
+// They are exercised by unit tests in this sprint but not yet used in the
+// main decode loop, hence the allow(dead_code).
+
+/// How a field should be included in projected output.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldIncluded {
+    /// Include the field fully (tag + value from buffer).
+    Yes,
+    /// Exclude the field entirely (no output).
+    No,
+    /// Include the tag but zero the value (existence-only mode).
+    ExistenceOnly,
+}
+
+/// How a node in the include-field tree contributes to projection.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IncludeType {
+    /// Include the field and all its children fully.
+    IncludeFully = 0,
+    /// Include only specific children (this node is a submessage ancestor).
+    IncludeChild = 1,
+    /// Include the field's tag but zero its value.
+    ExistenceOnly = 2,
+}
+
+/// An entry in the include-field map.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct IncludedField {
+    /// Sequential ID assigned to this field (used as parent_id for children).
+    field_id: u32,
+    /// How this field is included.
+    include_type: IncludeType,
+}
+
+/// Sentinel value for the root parent ID (no parent).
+const INVALID_POS: u32 = u32::MAX;
+
+/// Pre-computed include-field tree built from a `FieldProjection`.
+///
+/// Maps `(parent_field_id, field_number)` to `IncludedField`. The root
+/// parent ID is `INVALID_POS`. This mirrors C++'s `Context::include_fields`.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct IncludeFieldMap {
+    map: std::collections::HashMap<(u32, u32), IncludedField>,
+}
+
+impl IncludeFieldMap {
+    /// Build the include-field map from a `FieldProjection`.
+    ///
+    /// Returns `None` if the projection is `all()` (no filtering needed).
+    fn from_projection(projection: &FieldProjection) -> Option<Self> {
+        let fields = projection.fields()?;
+        let mut map = std::collections::HashMap::new();
+        for field in fields {
+            let path = &field.path;
+            if path.is_empty() {
+                // An empty path means include everything — projection disabled.
+                return None;
+            }
+            let path_len = path.len();
+            let existence_only = field.existence_only;
+            let mut current_id = INVALID_POS;
+            for (i, &field_number) in path.iter().enumerate() {
+                let next_id = map.len() as u32;
+                let include_type = if i + 1 == path_len {
+                    if existence_only {
+                        IncludeType::ExistenceOnly
+                    } else {
+                        IncludeType::IncludeFully
+                    }
+                } else {
+                    IncludeType::IncludeChild
+                };
+                let entry = map
+                    .entry((current_id, field_number))
+                    .or_insert(IncludedField {
+                        field_id: next_id,
+                        include_type,
+                    });
+                // If the same key is inserted multiple times, use the more
+                // inclusive type (lower ordinal wins, matching C++'s std::min).
+                if include_type < entry.include_type {
+                    entry.include_type = include_type;
+                }
+                current_id = entry.field_id;
+            }
+        }
+        Some(Self { map })
+    }
+
+    /// Look up an entry in the include-field map.
+    fn get(&self, parent_id: u32, field_number: u32) -> Option<&IncludedField> {
+        self.map.get(&(parent_id, field_number))
+    }
+}
+
+/// Template data stored for a `SelectCallback` node, holding the information
+/// needed to resolve the concrete callback type at execution time.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct NodeTemplate {
+    /// The proto tag (with submessage wire type already mapped to LengthDelimited).
+    tag: u32,
+    /// The subtype byte.
+    subtype: u8,
+    /// Length of the tag varint encoding.
+    tag_length: usize,
 }
 
 /// A single node in the transpose state machine.
@@ -93,6 +223,9 @@ struct StateMachineNode {
     /// Whether the transition to `next_node_index` is implicit (no transition
     /// byte consumed from the transitions stream).
     is_implicit: bool,
+    /// Index into the `node_templates` vec for [`CallbackType::SelectCallback`]
+    /// nodes. `None` for non-projection nodes.
+    node_template_index: Option<usize>,
 }
 
 /// A cursor over a byte buffer that tracks the current read position.
@@ -337,6 +470,8 @@ struct BuiltStateMachine {
     first_node: usize,
     /// Whether any node uses the NonProto callback.
     has_nonproto_op: bool,
+    /// Templates for `SelectCallback` nodes (only populated when projection active).
+    node_templates: Vec<NodeTemplate>,
 }
 
 /// Decodes a transposed chunk, yielding records one at a time.
@@ -392,7 +527,10 @@ impl TransposeChunkDecoder {
         };
 
         let mut parsed = Self::parse_header_and_buckets_with_projection(&chunk, active_projection)?;
-        let built = Self::build_state_machine_nodes(&mut parsed)?;
+
+        // Build include-field map when projection is active.
+        let include_map = active_projection.and_then(IncludeFieldMap::from_projection);
+        let built = Self::build_state_machine_nodes(&mut parsed, include_map.is_some())?;
 
         // Determine nonproto_lengths buffer index (always the last buffer).
         let nonproto_lengths_index = if built.has_nonproto_op {
@@ -419,6 +557,8 @@ impl TransposeChunkDecoder {
             &mut BufferCursor::new(transitions_data),
             built.first_node,
             nonproto_lengths_index,
+            &built.node_templates,
+            include_map.as_ref(),
         )?;
 
         // Apply field projection post-decode if active: iterate record slices,
@@ -850,12 +990,14 @@ impl TransposeChunkDecoder {
     /// indices and `first_node`, then validate (implicit-loop detection).
     fn build_state_machine_nodes(
         parsed: &mut ParsedHeader,
+        projection_enabled: bool,
     ) -> Result<BuiltStateMachine, RiegeliError> {
         let num_states = parsed.num_states;
         let num_buffers = parsed.num_buffers;
         let hdr = &mut parsed.hdr;
 
         let mut nodes: Vec<StateMachineNode> = Vec::with_capacity(num_states + 0xFF);
+        let mut node_templates: Vec<NodeTemplate> = Vec::new();
         let mut subtype_idx: usize = 0;
         let mut has_nonproto_op = false;
 
@@ -886,6 +1028,8 @@ impl TransposeChunkDecoder {
                 &parsed.subtypes_bytes,
                 &mut subtype_idx,
                 &mut has_nonproto_op,
+                projection_enabled,
+                &mut node_templates,
             )?;
             nodes.push(node);
         }
@@ -908,6 +1052,7 @@ impl TransposeChunkDecoder {
                 buffer_index: None,
                 next_node_index: 0,
                 is_implicit: false,
+                node_template_index: None,
             });
         }
 
@@ -922,10 +1067,10 @@ impl TransposeChunkDecoder {
             nodes,
             first_node,
             has_nonproto_op,
+            node_templates,
         })
     }
 
-    /// Build a single [`StateMachineNode`] from its raw tag and metadata.
     /// Build a single [`StateMachineNode`] from its raw tag and metadata.
     #[allow(clippy::too_many_arguments)]
     fn build_single_node(
@@ -938,6 +1083,8 @@ impl TransposeChunkDecoder {
         subtypes_bytes: &[u8],
         subtype_idx: &mut usize,
         has_nonproto_op: &mut bool,
+        projection_enabled: bool,
+        node_templates: &mut Vec<NodeTemplate>,
     ) -> Result<StateMachineNode, RiegeliError> {
         // Reserved message IDs (tag < 8).
         match raw_tag {
@@ -949,6 +1096,7 @@ impl TransposeChunkDecoder {
                     buffer_index: None,
                     next_node_index: next_node_idx,
                     is_implicit,
+                    node_template_index: None,
                 });
             }
             t if t == message_id::NON_PROTO => {
@@ -966,6 +1114,7 @@ impl TransposeChunkDecoder {
                     buffer_index: Some(buf_idx),
                     next_node_index: next_node_idx,
                     is_implicit,
+                    node_template_index: None,
                 });
             }
             t if t == message_id::START_OF_MESSAGE => {
@@ -976,17 +1125,40 @@ impl TransposeChunkDecoder {
                     buffer_index: None,
                     next_node_index: next_node_idx,
                     is_implicit,
+                    node_template_index: None,
                 });
             }
             t if t == message_id::START_OF_SUBMESSAGE => {
-                return Ok(StateMachineNode {
-                    tag_data: Vec::new(),
-                    tag_data_size: 0,
-                    callback_type: CallbackType::SubmessageStart,
-                    buffer_index: None,
-                    next_node_index: next_node_idx,
-                    is_implicit,
-                });
+                if projection_enabled {
+                    // When projection is active, StartOfSubmessage gets a
+                    // SelectCallback so it can be resolved at execution time
+                    // to either SubmessageStart or SkippedSubmessageStart.
+                    let tmpl_idx = node_templates.len();
+                    node_templates.push(NodeTemplate {
+                        tag: message_id::START_OF_SUBMESSAGE,
+                        subtype: 0,
+                        tag_length: 0,
+                    });
+                    return Ok(StateMachineNode {
+                        tag_data: Vec::new(),
+                        tag_data_size: 0,
+                        callback_type: CallbackType::SelectCallback,
+                        buffer_index: None,
+                        next_node_index: next_node_idx,
+                        is_implicit,
+                        node_template_index: Some(tmpl_idx),
+                    });
+                } else {
+                    return Ok(StateMachineNode {
+                        tag_data: Vec::new(),
+                        tag_data_size: 0,
+                        callback_type: CallbackType::SubmessageStart,
+                        buffer_index: None,
+                        next_node_index: next_node_idx,
+                        is_implicit,
+                        node_template_index: None,
+                    });
+                }
             }
             _ => {}
         }
@@ -1000,10 +1172,11 @@ impl TransposeChunkDecoder {
             num_buffers,
             subtypes_bytes,
             subtype_idx,
+            projection_enabled,
+            node_templates,
         )
     }
 
-    /// Build a [`StateMachineNode`] for a proto tag (not a reserved message ID).
     /// Build a [`StateMachineNode`] for a proto tag (not a reserved message ID).
     #[allow(clippy::too_many_arguments)]
     fn build_proto_tag_node(
@@ -1015,6 +1188,8 @@ impl TransposeChunkDecoder {
         num_buffers: usize,
         subtypes_bytes: &[u8],
         subtype_idx: &mut usize,
+        projection_enabled: bool,
+        node_templates: &mut Vec<NodeTemplate>,
     ) -> Result<StateMachineNode, RiegeliError> {
         let mut tag = raw_tag;
         let mut st: u8 = subtype::TRIVIAL;
@@ -1053,25 +1228,46 @@ impl TransposeChunkDecoder {
             None
         };
 
-        let wt = tag_wire_type(tag);
-        let callback_type = Self::callback_for_wire_type(wt, st)?;
-
         let mut tag_data_vec = tag_bytes;
-        let tag_data_size = if wt == Some(WireType::Varint) && st >= subtype::VARINT_INLINE_0 {
-            tag_data_vec.push(st - subtype::VARINT_INLINE_0);
-            tag_length + 1
-        } else {
-            tag_length
-        };
+        let tag_data_size =
+            if tag_wire_type(tag) == Some(WireType::Varint) && st >= subtype::VARINT_INLINE_0 {
+                tag_data_vec.push(st - subtype::VARINT_INLINE_0);
+                tag_length + 1
+            } else {
+                tag_length
+            };
 
-        Ok(StateMachineNode {
-            tag_data: tag_data_vec,
-            tag_data_size,
-            callback_type,
-            buffer_index: buf_idx,
-            next_node_index: next_node_idx,
-            is_implicit,
-        })
+        if projection_enabled {
+            // When projection is active, proto field nodes get SelectCallback
+            // so their inclusion can be resolved at execution time.
+            let tmpl_idx = node_templates.len();
+            node_templates.push(NodeTemplate {
+                tag,
+                subtype: st,
+                tag_length,
+            });
+            Ok(StateMachineNode {
+                tag_data: tag_data_vec,
+                tag_data_size,
+                callback_type: CallbackType::SelectCallback,
+                buffer_index: buf_idx,
+                next_node_index: next_node_idx,
+                is_implicit,
+                node_template_index: Some(tmpl_idx),
+            })
+        } else {
+            let wt = tag_wire_type(tag);
+            let callback_type = Self::callback_for_wire_type(wt, st)?;
+            Ok(StateMachineNode {
+                tag_data: tag_data_vec,
+                tag_data_size,
+                callback_type,
+                buffer_index: buf_idx,
+                next_node_index: next_node_idx,
+                is_implicit,
+                node_template_index: None,
+            })
+        }
     }
 
     /// Determine the callback type from a wire type and subtype.
@@ -1122,6 +1318,146 @@ impl TransposeChunkDecoder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Select-callback resolution (projection-aware callback type resolution)
+// ---------------------------------------------------------------------------
+
+/// Resolve a `SelectCallback` node to its concrete callback type by walking
+/// the submessage stack against the include-field map.
+#[allow(dead_code)]
+///
+/// This mirrors C++ `TransposeDecoder::SetCallbackType`. For
+/// `StartOfSubmessage` nodes, resolves to `SubmessageStart` or
+/// `SkippedSubmessageStart` based on the current `skipped_submessage_level`.
+/// For proto field nodes, walks the submessage stack to classify the field
+/// as included, excluded, or existence-only, then maps that to the concrete
+/// callback type.
+fn resolve_select_callback(
+    node: &StateMachineNode,
+    node_templates: &[NodeTemplate],
+    include_map: &IncludeFieldMap,
+    submessage_stack: &[SubmessageFrame],
+    nodes: &[StateMachineNode],
+    skipped_submessage_level: i32,
+) -> Result<CallbackType, RiegeliError> {
+    let tmpl_idx = node.node_template_index.ok_or_else(|| {
+        RiegeliError::MalformedData("SelectCallback node missing template index".into())
+    })?;
+    let tmpl = &node_templates[tmpl_idx];
+
+    // StartOfSubmessage: resolve based on skipped level.
+    if tmpl.tag == message_id::START_OF_SUBMESSAGE {
+        return if skipped_submessage_level > 0 {
+            Ok(CallbackType::SkippedSubmessageStart)
+        } else {
+            Ok(CallbackType::SubmessageStart)
+        };
+    }
+
+    // Proto field node: walk submessage stack to determine inclusion.
+    let mut field_included = FieldIncluded::No;
+
+    if skipped_submessage_level == 0 {
+        // Start with ExistenceOnly assumption and walk the stack to resolve.
+        field_included = FieldIncluded::ExistenceOnly;
+        let mut current_parent_id = INVALID_POS;
+
+        for frame in submessage_stack.iter() {
+            let frame_node = &nodes[frame.node_index];
+            // The frame node is a SubmessageEnd node whose tag_data contains
+            // the tag bytes for the enclosing length-delimited field.
+            if frame_node.tag_data.is_empty() {
+                field_included = FieldIncluded::No;
+                break;
+            }
+            let (frame_tag, _) = decode_u32(&frame_node.tag_data)
+                .map_err(|e| RiegeliError::MalformedData(format!("decoding frame tag: {e}")))?;
+            let frame_field_number = tag_field_number(frame_tag);
+
+            match include_map.get(current_parent_id, frame_field_number) {
+                None => {
+                    field_included = FieldIncluded::No;
+                    break;
+                }
+                Some(entry) => {
+                    if entry.include_type == IncludeType::IncludeFully {
+                        field_included = FieldIncluded::Yes;
+                        break;
+                    }
+                    current_parent_id = entry.field_id;
+                }
+            }
+        }
+
+        // Now resolve the field itself (unless already decided).
+        if field_included == FieldIncluded::ExistenceOnly {
+            let node_field_number = tag_field_number(tmpl.tag);
+            match include_map.get(current_parent_id, node_field_number) {
+                None => {
+                    field_included = FieldIncluded::No;
+                }
+                Some(entry) => {
+                    if entry.include_type == IncludeType::IncludeFully
+                        || entry.include_type == IncludeType::IncludeChild
+                    {
+                        field_included = FieldIncluded::Yes;
+                    }
+                    // else stays ExistenceOnly
+                }
+            }
+        }
+    }
+
+    // Map FieldIncluded to concrete CallbackType.
+    callback_for_field_included(field_included, tmpl.tag, tmpl.subtype)
+}
+
+/// Map a `FieldIncluded` classification to the concrete `CallbackType` for
+/// a proto field node with the given tag and subtype.
+#[allow(dead_code)]
+fn callback_for_field_included(
+    field_included: FieldIncluded,
+    tag: u32,
+    st: u8,
+) -> Result<CallbackType, RiegeliError> {
+    let wt = tag_wire_type(tag);
+    match field_included {
+        FieldIncluded::Yes => {
+            // Normal included field — dispatch to the standard callback.
+            TransposeChunkDecoder::callback_for_wire_type(wt, st)
+        }
+        FieldIncluded::No => {
+            // Excluded field — produce no output.
+            match wt {
+                Some(WireType::Varint) | Some(WireType::Fixed32) | Some(WireType::Fixed64) => {
+                    Ok(CallbackType::NoOp)
+                }
+                Some(WireType::LengthDelimited) => match st {
+                    s if s == subtype::LENGTH_DELIMITED_STRING => Ok(CallbackType::NoOp),
+                    s if s == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE => {
+                        Ok(CallbackType::SkippedSubmessageEnd)
+                    }
+                    _ => Err(RiegeliError::MalformedData(format!(
+                        "unknown LengthDelimited subtype {st} in excluded field"
+                    ))),
+                },
+                Some(WireType::StartGroup) => Ok(CallbackType::SkippedSubmessageStart),
+                Some(WireType::EndGroup) => Ok(CallbackType::SkippedSubmessageEnd),
+                None => Err(RiegeliError::MalformedData(
+                    "invalid wire type in excluded field".into(),
+                )),
+            }
+        }
+        FieldIncluded::ExistenceOnly => {
+            // Existence-only: emit tag + zero value.
+            // For this sprint, we treat it the same as included (the apply()
+            // fallback handles existence-only rewriting). Sprint 33 will
+            // produce zero values directly.
+            TransposeChunkDecoder::callback_for_wire_type(wt, st)
+        }
+    }
+}
+
 /// Mutable decode state passed through the reconstruction loop.
 struct DecodeState<'a> {
     dest: &'a mut BackwardBuffer,
@@ -1130,20 +1466,47 @@ struct DecodeState<'a> {
     limits: &'a mut Vec<usize>,
     num_records: u64,
     nonproto_lengths_index: Option<usize>,
+    /// Templates for SelectCallback nodes (empty when no projection).
+    node_templates: &'a [NodeTemplate],
+    /// Include-field map for projection resolution (None when no projection).
+    include_map: Option<&'a IncludeFieldMap>,
+    /// Number of nested skipped submessage levels (projection only).
+    skipped_submessage_level: i32,
 }
 
 /// Execute one node action, writing field data to the backward buffer.
 ///
 /// Handles all `CallbackType` variants: structural markers (NoOp, MessageStart,
 /// SubmessageStart/End), data fields (Varint, Fixed32, Fixed64, StringField,
-/// CopyTag), and non-proto records.
+/// CopyTag), non-proto records, and projection-aware variants (SelectCallback,
+/// SkippedSubmessageStart, SkippedSubmessageEnd).
 fn execute_node_action(
     node: &StateMachineNode,
     current_node_idx: usize,
     nodes: &[StateMachineNode],
     state: &mut DecodeState<'_>,
 ) -> Result<(), RiegeliError> {
-    match node.callback_type {
+    // For SelectCallback, resolve to the non-projection equivalent callback.
+    // In this sprint (31), the resolve logic exists but the decode loop still
+    // produces full records — the post-decode apply() fallback handles
+    // projection. The SelectCallback is resolved to the *included* callback
+    // type so the decode output is identical to the non-projection path.
+    // Sprint 32 will wire in the actual projection-during-decode behavior.
+    let effective_callback = if node.callback_type == CallbackType::SelectCallback {
+        let tmpl_idx = node
+            .node_template_index
+            .ok_or_else(|| RiegeliError::MalformedData("SelectCallback missing template".into()))?;
+        let tmpl = &state.node_templates[tmpl_idx];
+        if tmpl.tag == message_id::START_OF_SUBMESSAGE {
+            CallbackType::SubmessageStart
+        } else {
+            TransposeChunkDecoder::callback_for_wire_type(tag_wire_type(tmpl.tag), tmpl.subtype)?
+        }
+    } else {
+        node.callback_type
+    };
+
+    match effective_callback {
         CallbackType::NoOp => {}
         CallbackType::MessageStart => {
             if !state.submessage_stack.is_empty() {
@@ -1186,6 +1549,32 @@ fn execute_node_action(
         CallbackType::Failure => {
             return Err(RiegeliError::MalformedData(
                 "hit failure node in state machine".into(),
+            ));
+        }
+        // Projection-aware variants: in this sprint, these dispatch to their
+        // non-projection equivalents since apply() fallback is still active.
+        // SkippedSubmessageEnd behaves like SubmessageEnd for now.
+        CallbackType::SkippedSubmessageEnd => {
+            state.submessage_stack.push(SubmessageFrame {
+                end_pos: state.dest.pos(),
+                node_index: current_node_idx,
+            });
+            state.skipped_submessage_level += 1;
+        }
+        // SkippedSubmessageStart behaves like SubmessageStart for now.
+        CallbackType::SkippedSubmessageStart => {
+            if state.skipped_submessage_level <= 0 {
+                return Err(RiegeliError::MalformedData(
+                    "skipped submessage stack underflow".into(),
+                ));
+            }
+            state.skipped_submessage_level -= 1;
+            write_submessage_header(state.dest, nodes, state.submessage_stack)?;
+        }
+        // SelectCallback should have been resolved above.
+        CallbackType::SelectCallback => {
+            return Err(RiegeliError::MalformedData(
+                "unresolved SelectCallback in decode loop".into(),
             ));
         }
     }
@@ -1359,6 +1748,8 @@ fn run_state_machine(
     transitions: &mut BufferCursor,
     first_node: usize,
     nonproto_lengths_index: Option<usize>,
+    node_templates: &[NodeTemplate],
+    include_map: Option<&IncludeFieldMap>,
 ) -> Result<(BackwardBuffer, Vec<usize>), RiegeliError> {
     let mut dest = BackwardBuffer::new(decoded_data_size as usize);
     let mut limits: Vec<usize> = Vec::with_capacity(num_records as usize);
@@ -1378,6 +1769,9 @@ fn run_state_machine(
             limits: &mut limits,
             num_records,
             nonproto_lengths_index,
+            node_templates,
+            include_map,
+            skipped_submessage_level: 0,
         };
         loop {
             execute_node_action(
@@ -1473,6 +1867,8 @@ fn decode_all_records(
     transitions: &mut BufferCursor,
     first_node: usize,
     nonproto_lengths_index: Option<usize>,
+    node_templates: &[NodeTemplate],
+    include_map: Option<&IncludeFieldMap>,
 ) -> Result<(Vec<u8>, Vec<usize>), RiegeliError> {
     let (dest, limits) = run_state_machine(
         num_records,
@@ -1482,6 +1878,8 @@ fn decode_all_records(
         transitions,
         first_node,
         nonproto_lengths_index,
+        node_templates,
+        include_map,
     )?;
     finalize_records(dest, limits, num_records)
 }
@@ -1523,6 +1921,8 @@ fn contains_implicit_loop(nodes: &[StateMachineNode], _num_states: usize) -> boo
 mod tests {
     use super::*;
     use crate::chunk_header::{ChunkHeader, ChunkType};
+    use crate::field_projection::Field;
+    use crate::proto::make_tag;
     use crate::varint::encode_u64;
 
     /// Helper to build a transpose chunk from hand-crafted state machine.
@@ -2311,5 +2711,328 @@ mod tests {
         assert!(dec.read_record().unwrap().is_none());
         assert!(dec.read_record().unwrap().is_none());
         assert!(dec.read_record().unwrap().is_none());
+    }
+
+    // =========================================================================
+    // Sprint 31: Projection-aware callback type tests
+    // =========================================================================
+
+    #[test]
+    fn test_include_field_map_from_simple_projection() {
+        // Projection: include field 1 at top level.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        let map = IncludeFieldMap::from_projection(&proj).unwrap();
+        let entry = map.get(INVALID_POS, 1).expect("field 1 should be in map");
+        assert_eq!(entry.include_type, IncludeType::IncludeFully);
+        // Field 2 should not be present.
+        assert!(map.get(INVALID_POS, 2).is_none());
+    }
+
+    #[test]
+    fn test_include_field_map_nested_path() {
+        // Projection: include field path [2, 3, 5].
+        let proj = FieldProjection::new().add_field(Field::new(vec![2, 3, 5]));
+        let map = IncludeFieldMap::from_projection(&proj).unwrap();
+
+        // Root -> field 2: IncludeChild
+        let entry2 = map.get(INVALID_POS, 2).expect("field 2 at root");
+        assert_eq!(entry2.include_type, IncludeType::IncludeChild);
+
+        // field 2 -> field 3: IncludeChild
+        let entry3 = map.get(entry2.field_id, 3).expect("field 3 under field 2");
+        assert_eq!(entry3.include_type, IncludeType::IncludeChild);
+
+        // field 3 -> field 5: IncludeFully
+        let entry5 = map.get(entry3.field_id, 5).expect("field 5 under field 3");
+        assert_eq!(entry5.include_type, IncludeType::IncludeFully);
+    }
+
+    #[test]
+    fn test_include_field_map_existence_only() {
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]).existence_only());
+        let map = IncludeFieldMap::from_projection(&proj).unwrap();
+        let entry = map.get(INVALID_POS, 1).expect("field 1 should be present");
+        assert_eq!(entry.include_type, IncludeType::ExistenceOnly);
+    }
+
+    #[test]
+    fn test_include_field_map_more_inclusive_wins() {
+        // Two paths through same prefix: [1, 2] fully and [1, 3] fully.
+        // Field 1 should be IncludeChild (not overridden to IncludeFully).
+        let proj = FieldProjection::new()
+            .add_field(Field::new(vec![1, 2]))
+            .add_field(Field::new(vec![1, 3]));
+        let map = IncludeFieldMap::from_projection(&proj).unwrap();
+        let entry1 = map.get(INVALID_POS, 1).expect("field 1 at root");
+        assert_eq!(entry1.include_type, IncludeType::IncludeChild);
+
+        // Now add a path that includes field 1 fully: [1].
+        let proj2 = proj.add_field(Field::new(vec![1]));
+        let map2 = IncludeFieldMap::from_projection(&proj2).unwrap();
+        let entry1b = map2.get(INVALID_POS, 1).expect("field 1 at root");
+        // IncludeFully < IncludeChild, so IncludeFully wins.
+        assert_eq!(entry1b.include_type, IncludeType::IncludeFully);
+    }
+
+    #[test]
+    fn test_include_field_map_all_projection_returns_none() {
+        let proj = FieldProjection::all();
+        assert!(IncludeFieldMap::from_projection(&proj).is_none());
+    }
+
+    #[test]
+    fn test_callback_for_field_included_excluded_varint() {
+        let tag = make_tag(1, WireType::Varint);
+        let result = callback_for_field_included(FieldIncluded::No, tag, 0).unwrap();
+        assert_eq!(result, CallbackType::NoOp);
+    }
+
+    #[test]
+    fn test_callback_for_field_included_excluded_submessage_end() {
+        let tag = make_tag(1, WireType::LengthDelimited);
+        let result = callback_for_field_included(
+            FieldIncluded::No,
+            tag,
+            subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE,
+        )
+        .unwrap();
+        assert_eq!(result, CallbackType::SkippedSubmessageEnd);
+    }
+
+    #[test]
+    fn test_callback_for_field_included_excluded_string() {
+        let tag = make_tag(1, WireType::LengthDelimited);
+        let result =
+            callback_for_field_included(FieldIncluded::No, tag, subtype::LENGTH_DELIMITED_STRING)
+                .unwrap();
+        assert_eq!(result, CallbackType::NoOp);
+    }
+
+    #[test]
+    fn test_callback_for_field_included_excluded_fixed32() {
+        let tag = make_tag(1, WireType::Fixed32);
+        let result = callback_for_field_included(FieldIncluded::No, tag, 0).unwrap();
+        assert_eq!(result, CallbackType::NoOp);
+    }
+
+    #[test]
+    fn test_callback_for_field_included_excluded_fixed64() {
+        let tag = make_tag(1, WireType::Fixed64);
+        let result = callback_for_field_included(FieldIncluded::No, tag, 0).unwrap();
+        assert_eq!(result, CallbackType::NoOp);
+    }
+
+    #[test]
+    fn test_select_callback_nodes_only_with_projection() {
+        // Without projection: no SelectCallback nodes.
+        use crate::transpose::encoder::TransposeChunkEncoder;
+        let record = vec![0x08, 0x01]; // field 1 varint = 1
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None);
+        enc.add_record(&record).unwrap();
+        let chunk = enc.encode().unwrap();
+
+        // Decode without projection.
+        let mut dec = TransposeChunkDecoder::new(chunk.clone()).unwrap();
+        let r = dec.read_record().unwrap().unwrap();
+        assert_eq!(r, record);
+
+        // Decode with projection including field 1 — should produce identical output.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        let mut dec2 = TransposeChunkDecoder::new_with_projection(chunk, Some(&proj)).unwrap();
+        let r2 = dec2.read_record().unwrap().unwrap();
+        assert_eq!(r2, record);
+    }
+
+    #[test]
+    fn test_projection_with_submessages_identical_output() {
+        // Encode a record with top-level field 1 = varint 42 and field 2 = varint 99.
+        use crate::transpose::encoder::TransposeChunkEncoder;
+        let mut record = Vec::new();
+        record.push(0x08); // field 1, varint
+        record.push(42);
+        record.push(0x10); // field 2, varint
+        record.push(99);
+
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None);
+        enc.add_record(&record).unwrap();
+        let chunk = enc.encode().unwrap();
+
+        // Decode without projection — should get full record.
+        let mut dec1 = TransposeChunkDecoder::new(chunk.clone()).unwrap();
+        let r1 = dec1.read_record().unwrap().unwrap();
+        assert_eq!(r1, record);
+
+        // Decode with projection [1] — should include only field 1.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        let mut dec2 =
+            TransposeChunkDecoder::new_with_projection(chunk.clone(), Some(&proj)).unwrap();
+        let r2 = dec2.read_record().unwrap().unwrap();
+        // The post-decode apply() filter removes field 2.
+        assert_eq!(r2, vec![0x08, 42]);
+
+        // Decode with all() projection — byte-identical to non-projected.
+        let proj_all = FieldProjection::all();
+        let mut dec3 = TransposeChunkDecoder::new_with_projection(chunk, Some(&proj_all)).unwrap();
+        let r3 = dec3.read_record().unwrap().unwrap();
+        assert_eq!(r3, record);
+    }
+
+    #[test]
+    fn test_resolve_nested_submessage_path_2_3_5() {
+        // Verify that resolve_select_callback correctly handles field path [2, 3, 5].
+        // Build an IncludeFieldMap for [2, 3, 5].
+        let proj = FieldProjection::new().add_field(Field::new(vec![2, 3, 5]));
+        let include_map = IncludeFieldMap::from_projection(&proj).unwrap();
+
+        // Simulate a submessage stack with entries for field 2 and field 3.
+        // The submessage stack stores SubmessageEnd nodes whose tag_data
+        // contains the tag bytes for the enclosing field.
+        let tag_field2 = make_tag(2, WireType::LengthDelimited);
+        let tag_field3 = make_tag(3, WireType::LengthDelimited);
+        let tag_field5 = make_tag(5, WireType::Varint);
+
+        let node_for_field2 = StateMachineNode {
+            tag_data: encode_u32(tag_field2),
+            tag_data_size: encode_u32(tag_field2).len(),
+            callback_type: CallbackType::SubmessageEnd,
+            buffer_index: None,
+            next_node_index: 0,
+            is_implicit: false,
+            node_template_index: None,
+        };
+        let node_for_field3 = StateMachineNode {
+            tag_data: encode_u32(tag_field3),
+            tag_data_size: encode_u32(tag_field3).len(),
+            callback_type: CallbackType::SubmessageEnd,
+            buffer_index: None,
+            next_node_index: 0,
+            is_implicit: false,
+            node_template_index: None,
+        };
+
+        let nodes = vec![node_for_field2, node_for_field3];
+        let submessage_stack = vec![
+            SubmessageFrame {
+                end_pos: 0,
+                node_index: 0, // field 2
+            },
+            SubmessageFrame {
+                end_pos: 0,
+                node_index: 1, // field 3
+            },
+        ];
+
+        // Create a SelectCallback node for field 5 (varint).
+        let node_templates = vec![NodeTemplate {
+            tag: tag_field5,
+            subtype: 0, // VARINT_1
+            tag_length: 1,
+        }];
+        let select_node = StateMachineNode {
+            tag_data: encode_u32(tag_field5),
+            tag_data_size: encode_u32(tag_field5).len(),
+            callback_type: CallbackType::SelectCallback,
+            buffer_index: Some(0),
+            next_node_index: 0,
+            is_implicit: false,
+            node_template_index: Some(0),
+        };
+
+        // Resolve: field 5 under submessage stack [field2, field3] with
+        // projection [2, 3, 5] should resolve to included (FieldIncluded::Yes).
+        let result = resolve_select_callback(
+            &select_node,
+            &node_templates,
+            &include_map,
+            &submessage_stack,
+            &nodes,
+            0, // skipped_submessage_level
+        )
+        .unwrap();
+
+        // Should be a Varint callback (included).
+        assert_eq!(
+            result,
+            CallbackType::Varint { data_length: 1 },
+            "field at path [2, 3, 5] should resolve to included Varint"
+        );
+    }
+
+    #[test]
+    fn test_resolve_excluded_field() {
+        // Projection: [1]. Resolve field 2 at top level -> excluded.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        let include_map = IncludeFieldMap::from_projection(&proj).unwrap();
+
+        let tag_field2 = make_tag(2, WireType::Varint);
+        let node_templates = vec![NodeTemplate {
+            tag: tag_field2,
+            subtype: 0,
+            tag_length: 1,
+        }];
+        let select_node = StateMachineNode {
+            tag_data: encode_u32(tag_field2),
+            tag_data_size: encode_u32(tag_field2).len(),
+            callback_type: CallbackType::SelectCallback,
+            buffer_index: Some(0),
+            next_node_index: 0,
+            is_implicit: false,
+            node_template_index: Some(0),
+        };
+
+        let result = resolve_select_callback(
+            &select_node,
+            &node_templates,
+            &include_map,
+            &[], // empty submessage stack (top level)
+            &[],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            CallbackType::NoOp,
+            "field 2 should be excluded (NoOp)"
+        );
+    }
+
+    #[test]
+    fn test_resolve_submessage_start_when_skipped() {
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        let include_map = IncludeFieldMap::from_projection(&proj).unwrap();
+
+        let node_templates = vec![NodeTemplate {
+            tag: message_id::START_OF_SUBMESSAGE,
+            subtype: 0,
+            tag_length: 0,
+        }];
+        let select_node = StateMachineNode {
+            tag_data: Vec::new(),
+            tag_data_size: 0,
+            callback_type: CallbackType::SelectCallback,
+            buffer_index: None,
+            next_node_index: 0,
+            is_implicit: false,
+            node_template_index: Some(0),
+        };
+
+        // When skipped_submessage_level > 0, should resolve to SkippedSubmessageStart.
+        let result = resolve_select_callback(
+            &select_node,
+            &node_templates,
+            &include_map,
+            &[],
+            &[],
+            1, // skipped level > 0
+        )
+        .unwrap();
+        assert_eq!(result, CallbackType::SkippedSubmessageStart);
+
+        // When skipped_submessage_level == 0, should resolve to SubmessageStart.
+        let result2 =
+            resolve_select_callback(&select_node, &node_templates, &include_map, &[], &[], 0)
+                .unwrap();
+        assert_eq!(result2, CallbackType::SubmessageStart);
     }
 }
