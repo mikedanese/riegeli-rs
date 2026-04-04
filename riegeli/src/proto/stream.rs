@@ -143,10 +143,10 @@ pub fn extract_varint_column<R: Read + Seek>(
                     record_index,
                     source: e,
                 })?;
-                if field.field_number == field_number {
-                    if let FieldValue::Varint(v) = field.value {
-                        values.push(v);
-                    }
+                if field.field_number == field_number
+                    && let FieldValue::Varint(v) = field.value
+                {
+                    values.push(v);
                 }
             }
         }

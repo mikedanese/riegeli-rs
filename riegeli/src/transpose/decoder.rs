@@ -884,10 +884,8 @@ impl TransposeChunkDecoder {
         // Step 2: Determine which buckets need decompression.
         let mut bucket_needed = vec![false; num_buckets];
         for (i, &needed) in needed_buffers.iter().enumerate() {
-            if needed {
-                if let Some(&bi) = buffer_to_bucket.get(i) {
-                    bucket_needed[bi] = true;
-                }
+            if needed && let Some(&bi) = buffer_to_bucket.get(i) {
+                bucket_needed[bi] = true;
             }
         }
 
@@ -1802,7 +1800,7 @@ fn write_existence_only_field(
     node_templates: &[NodeTemplate],
 ) -> Result<(), RiegeliError> {
     // Get the tag and subtype from the template.
-    let (tag, st) = if let Some(tmpl_idx) = node.node_template_index {
+    let (tag, _st) = if let Some(tmpl_idx) = node.node_template_index {
         let tmpl = &node_templates[tmpl_idx];
         (tmpl.tag, tmpl.subtype)
     } else if !node.tag_data.is_empty() {
