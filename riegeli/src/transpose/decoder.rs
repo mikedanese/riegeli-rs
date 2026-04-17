@@ -398,11 +398,15 @@ impl BackwardBuffer {
     /// Prepend `bytes` to the buffer.
     ///
     /// In backward-writer semantics this places `bytes` before all previously
-    /// written data. Internally the bytes are appended in reverse order.
+    /// written data. Internally the bytes are appended in reverse order. The
+    /// naive `for &b in bytes.iter().rev() { self.data.push(b); }` lowers to
+    /// `Vec::extend(Rev<Iter<u8>>)` which has no memcpy specialization and
+    /// degenerates to byte-at-a-time push; `extend_from_slice` + `reverse`
+    /// gives us two vectorized ops instead.
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes.iter().rev() {
-            self.data.push(b);
-        }
+        let start = self.data.len();
+        self.data.extend_from_slice(bytes);
+        self.data[start..].reverse();
     }
 
     /// Consume the buffer and return the data in correct forward order.
