@@ -51,10 +51,10 @@ x86-64 (10 000 records, large payload):
 
 | Config             | Rust write | Rust read | C++ write | C++ read |
 |--------------------|----------:|----------:|----------:|---------:|
-| simple+none        | 1348 MB/s | 2832 MB/s |  747 MB/s | 1343 MB/s |
-| simple+zstd:3      | 2123 MB/s | 3070 MB/s | 3693 MB/s | 5914 MB/s |
-| transpose+none     |  956 MB/s |  808 MB/s |  693 MB/s | 1149 MB/s |
-| transpose+zstd:3   | 1605 MB/s |  845 MB/s | 3142 MB/s | 4123 MB/s |
+| simple+none        | 1343 MB/s | 2778 MB/s |  752 MB/s | 1396 MB/s |
+| simple+zstd:3      | 1996 MB/s | 2994 MB/s | 3444 MB/s | 5849 MB/s |
+| transpose+none     |  950 MB/s | 1613 MB/s |  706 MB/s | 1185 MB/s |
+| transpose+zstd:3   | 1502 MB/s | 1607 MB/s | 2881 MB/s | 4021 MB/s |
 
 C++ read throughput is measured through the FFI bridge and includes a per-record
 copy across the boundary, making it lower than native C++ performance.
