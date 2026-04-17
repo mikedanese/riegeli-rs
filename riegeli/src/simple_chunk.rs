@@ -245,7 +245,7 @@ impl SimpleChunkDecoder {
         // Must have at least 1 byte for compression type.
         if data.is_empty() {
             return Err(RiegeliError::MalformedData(
-                "chunk data is empty".to_string(),
+                "chunk data is empty".into(),
             ));
         }
 
@@ -313,7 +313,7 @@ fn decode_uncompressed(
 ) -> Result<SimpleChunkDecoder, RiegeliError> {
     // Read the sizes section byte length (LengthPrefixed format).
     let (sizes_byte_len, varint_consumed) = decode_u64(payload).map_err(|e| {
-        RiegeliError::MalformedData(format!("failed to read sizes_byte_length: {e}"))
+        RiegeliError::MalformedData(format!("failed to read sizes_byte_length: {e}").into())
     })?;
     let sizes_byte_len = sizes_byte_len as usize;
 
@@ -323,7 +323,7 @@ fn decode_uncompressed(
             "sizes section truncated: need {sizes_byte_len} bytes starting at offset {sizes_start}, \
              but payload is only {} bytes",
             payload.len()
-        )));
+        ).into()));
     }
 
     let sizes_data = &payload[sizes_start..sizes_start + sizes_byte_len];
@@ -336,10 +336,10 @@ fn decode_uncompressed(
         if pos >= sizes_data.len() {
             return Err(RiegeliError::MalformedData(format!(
                 "unexpected end of sizes section at record {i}"
-            )));
+            ).into()));
         }
         let (size, consumed) = decode_u64(&sizes_data[pos..]).map_err(|e| {
-            RiegeliError::MalformedData(format!("varint decode error at record {i}: {e}"))
+            RiegeliError::MalformedData(format!("varint decode error at record {i}: {e}").into())
         })?;
         pos += consumed;
         sizes.push(size as usize);
@@ -350,7 +350,7 @@ fn decode_uncompressed(
         return Err(RiegeliError::MalformedData(format!(
             "values section truncated: need {total_values_len} bytes but only {} available",
             payload.len() - values_start
-        )));
+        ).into()));
     }
 
     let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_records);
@@ -382,7 +382,7 @@ fn decode_compressed(
 ) -> Result<SimpleChunkDecoder, RiegeliError> {
     if payload.is_empty() {
         return Err(RiegeliError::MalformedData(
-            "compressed payload is empty".to_string(),
+            "compressed payload is empty".into(),
         ));
     }
 
@@ -390,7 +390,7 @@ fn decode_compressed(
 
     // Read varint64(sizes_blob_len) -- the LengthPrefixed total byte count
     let (sizes_blob_len, consumed) = decode_u64(&payload[pos..])
-        .map_err(|e| RiegeliError::MalformedData(format!("failed to read sizes_blob_len: {e}")))?;
+        .map_err(|e| RiegeliError::MalformedData(format!("failed to read sizes_blob_len: {e}").into()))?;
     pos += consumed;
     let sizes_blob_len = sizes_blob_len as usize;
 
@@ -399,7 +399,7 @@ fn decode_compressed(
             "sizes blob truncated: need {sizes_blob_len} bytes at offset {pos}, \
              payload is {} bytes",
             payload.len()
-        )));
+        ).into()));
     }
 
     let sizes_blob = &payload[pos..pos + sizes_blob_len];
@@ -407,7 +407,7 @@ fn decode_compressed(
 
     // Parse sizes blob: varint64(uncompressed_sizes_len), compressed sizes data
     let (uncompressed_sizes_len, consumed2) = decode_u64(sizes_blob).map_err(|e| {
-        RiegeliError::MalformedData(format!("failed to read uncompressed_sizes_len: {e}"))
+        RiegeliError::MalformedData(format!("failed to read uncompressed_sizes_len: {e}").into())
     })?;
     let uncompressed_sizes_len = uncompressed_sizes_len as usize;
     let compressed_sizes = &sizes_blob[consumed2..];
@@ -418,13 +418,13 @@ fn decode_compressed(
             "decompressed sizes length {} != expected {}",
             sizes_bytes.len(),
             uncompressed_sizes_len
-        )));
+        ).into()));
     }
 
     // Parse values blob: varint64(uncompressed_values_len), compressed values data
     let values_blob = &payload[pos..];
     let (uncompressed_values_len, consumed3) = decode_u64(values_blob).map_err(|e| {
-        RiegeliError::MalformedData(format!("failed to read uncompressed_values_len: {e}"))
+        RiegeliError::MalformedData(format!("failed to read uncompressed_values_len: {e}").into())
     })?;
     let _uncompressed_values_len = uncompressed_values_len as usize;
     let compressed_values = &values_blob[consumed3..];
@@ -438,10 +438,10 @@ fn decode_compressed(
         if spos >= sizes_bytes.len() {
             return Err(RiegeliError::MalformedData(format!(
                 "unexpected end of decompressed sizes at record {i}"
-            )));
+            ).into()));
         }
         let (size, consumed) = decode_u64(&sizes_bytes[spos..]).map_err(|e| {
-            RiegeliError::MalformedData(format!("varint decode in sizes at record {i}: {e}"))
+            RiegeliError::MalformedData(format!("varint decode in sizes at record {i}: {e}").into())
         })?;
         spos += consumed;
         sizes.push(size as usize);
@@ -453,7 +453,7 @@ fn decode_compressed(
         return Err(RiegeliError::MalformedData(format!(
             "values length mismatch: sizes sum {total_values_len} != decompressed values {}",
             values_bytes.len()
-        )));
+        ).into()));
     }
 
     let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_records);

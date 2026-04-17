@@ -51,13 +51,13 @@ impl FromStr for RecordPosition {
         let (chunk_str, index_str) = s.split_once('/').ok_or_else(|| {
             RiegeliError::MalformedData(format!(
                 "invalid RecordPosition format (expected 'chunk/index'): {s}"
-            ))
+            ).into())
         })?;
         let chunk_begin = chunk_str.parse::<u64>().map_err(|e| {
-            RiegeliError::MalformedData(format!("invalid chunk_begin in RecordPosition: {e}"))
+            RiegeliError::MalformedData(format!("invalid chunk_begin in RecordPosition: {e}").into())
         })?;
         let record_index = index_str.parse::<u64>().map_err(|e| {
-            RiegeliError::MalformedData(format!("invalid record_index in RecordPosition: {e}"))
+            RiegeliError::MalformedData(format!("invalid record_index in RecordPosition: {e}").into())
         })?;
         Ok(Self {
             chunk_begin,

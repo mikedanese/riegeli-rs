@@ -277,7 +277,7 @@ impl BufferCursor {
         }
         if self.pos + n > self.data.len() {
             return Err(RiegeliError::MalformedData(
-                "buffer underflow in transpose chunk".to_string(),
+                "buffer underflow in transpose chunk".into(),
             ));
         }
         let slice = &self.data[self.pos..self.pos + n];
@@ -292,7 +292,7 @@ impl BufferCursor {
         }
         let remaining = &self.data[self.pos..];
         let (val, consumed) = decode_u32(remaining).map_err(|e| {
-            RiegeliError::MalformedData(format!("varint32 decode error in buffer: {e}"))
+            RiegeliError::MalformedData(format!("varint32 decode error in buffer: {e}").into())
         })?;
         self.pos += consumed;
         Ok(val)
@@ -305,7 +305,7 @@ impl BufferCursor {
         }
         let remaining = &self.data[self.pos..];
         let (val, consumed) = decode_u64(remaining).map_err(|e| {
-            RiegeliError::MalformedData(format!("varint64 decode error in buffer: {e}"))
+            RiegeliError::MalformedData(format!("varint64 decode error in buffer: {e}").into())
         })?;
         self.pos += consumed;
         Ok(val)
@@ -318,7 +318,7 @@ impl BufferCursor {
         }
         if self.pos >= self.data.len() {
             return Err(RiegeliError::MalformedData(
-                "buffer underflow reading byte".to_string(),
+                "buffer underflow reading byte".into(),
             ));
         }
         let b = self.data[self.pos];
@@ -538,7 +538,7 @@ impl TransposeChunkDecoder {
         let nonproto_lengths_index = if built.has_nonproto_op {
             if parsed.num_buffers == 0 {
                 return Err(RiegeliError::MalformedData(
-                    "nonproto op but no buffers".to_string(),
+                    "nonproto op but no buffers".into(),
                 ));
             }
             Some(parsed.num_buffers - 1)
@@ -593,20 +593,20 @@ impl TransposeChunkDecoder {
 
         if data.is_empty() {
             return Err(RiegeliError::MalformedData(
-                "transpose chunk data is empty".to_string(),
+                "transpose chunk data is empty".into(),
             ));
         }
         let compression_type = CompressionType::try_from(data[0])?;
         pos += 1;
 
         let (header_length, consumed) = decode_u64(&data[pos..])
-            .map_err(|e| RiegeliError::MalformedData(format!("reading header_length: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("reading header_length: {e}").into()))?;
         pos += consumed;
 
         let header_end = pos + header_length as usize;
         if header_end > data.len() {
             return Err(RiegeliError::MalformedData(
-                "transpose header extends past chunk data".to_string(),
+                "transpose header extends past chunk data".into(),
             ));
         }
         let header_compressed = &data[pos..header_end];
@@ -780,7 +780,7 @@ impl TransposeChunkDecoder {
             let end = pos + size;
             if end > data.len() {
                 return Err(RiegeliError::MalformedData(
-                    "bucket data extends past chunk data".to_string(),
+                    "bucket data extends past chunk data".into(),
                 ));
             }
             bucket_compressed_data.push(data[pos..end].to_vec());
@@ -803,7 +803,7 @@ impl TransposeChunkDecoder {
             return Ok(compressed.len());
         }
         let (size, _consumed) = decode_u64(compressed).map_err(|e| {
-            RiegeliError::MalformedData(format!("reading bucket uncompressed_size prefix: {e}"))
+            RiegeliError::MalformedData(format!("reading bucket uncompressed_size prefix: {e}").into())
         })?;
         Ok(size as usize)
     }
@@ -849,7 +849,7 @@ impl TransposeChunkDecoder {
                 return Err(RiegeliError::MalformedData(format!(
                     "buffer {} (size {}) exceeds remaining bucket {} capacity ({})",
                     i, buf_size, bucket_index, bucket_remaining
-                )));
+                ).into()));
             }
             buffer_to_bucket.push(bucket_index);
             bucket_remaining -= buf_size;
@@ -919,7 +919,7 @@ impl TransposeChunkDecoder {
                     RiegeliError::MalformedData(format!(
                         "needed buffer {} in undecompressed bucket {}",
                         i, bi
-                    ))
+                    ).into())
                 })?;
                 let end = offset + buf_size;
                 if end > decompressed.len() {
@@ -929,7 +929,7 @@ impl TransposeChunkDecoder {
                         buf_size,
                         bi,
                         decompressed.len()
-                    )));
+                    ).into()));
                 }
                 buffers.push(BufferCursor::new(decompressed[offset..end].to_vec()));
             } else {
@@ -999,7 +999,7 @@ impl TransposeChunkDecoder {
                     return Err(RiegeliError::MalformedData(format!(
                         "node index {} too large (num_states={})",
                         adjusted, num_states
-                    )));
+                    ).into()));
                 }
                 (true, adjusted)
             } else {
@@ -1028,7 +1028,7 @@ impl TransposeChunkDecoder {
             return Err(RiegeliError::MalformedData(format!(
                 "first_node {} >= num_states {}",
                 first_node, num_states
-            )));
+            ).into()));
         }
 
         // Add 0xFF failure sentinel nodes.
@@ -1047,7 +1047,7 @@ impl TransposeChunkDecoder {
         // Validate: check for implicit loops.
         if contains_implicit_loop(&nodes, num_states) {
             return Err(RiegeliError::MalformedData(
-                "state machine contains an implicit loop".to_string(),
+                "state machine contains an implicit loop".into(),
             ));
         }
 
@@ -1091,7 +1091,7 @@ impl TransposeChunkDecoder {
                 let buf_idx = hdr.read_varint32()? as usize;
                 if buf_idx >= num_buffers {
                     return Err(RiegeliError::MalformedData(
-                        "nonproto buffer index too large".to_string(),
+                        "nonproto buffer index too large".into(),
                     ));
                 }
                 *has_nonproto_op = true;
@@ -1193,7 +1193,7 @@ impl TransposeChunkDecoder {
             return Err(RiegeliError::MalformedData(format!(
                 "invalid tag {} in state {}",
                 tag, state_index
-            )));
+            ).into()));
         }
 
         let tag_bytes = encode_u32(tag);
@@ -1208,7 +1208,7 @@ impl TransposeChunkDecoder {
             let idx = hdr.read_varint32()? as usize;
             if idx >= num_buffers {
                 return Err(RiegeliError::MalformedData(
-                    "buffer index too large".to_string(),
+                    "buffer index too large".into(),
                 ));
             }
             Some(idx)
@@ -1279,11 +1279,11 @@ impl TransposeChunkDecoder {
                 }
                 _ => Err(RiegeliError::MalformedData(format!(
                     "unknown LengthDelimited subtype {st}"
-                ))),
+                ).into())),
             },
             Some(WireType::StartGroup) | Some(WireType::EndGroup) => Ok(CallbackType::CopyTag),
             None => Err(RiegeliError::MalformedData(
-                "invalid wire type in tag".to_string(),
+                "invalid wire type in tag".into(),
             )),
         }
     }
@@ -1358,7 +1358,7 @@ fn resolve_select_callback(
                 break;
             }
             let (frame_tag, _) = decode_u32(&frame_node.tag_data)
-                .map_err(|e| RiegeliError::MalformedData(format!("decoding frame tag: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("decoding frame tag: {e}").into()))?;
             let frame_field_number = tag_field_number(frame_tag);
 
             match include_map.get(current_parent_id, frame_field_number) {
@@ -1425,7 +1425,7 @@ fn callback_for_field_included(
                     }
                     _ => Err(RiegeliError::MalformedData(format!(
                         "unknown LengthDelimited subtype {st} in excluded field"
-                    ))),
+                    ).into())),
                 },
                 Some(WireType::StartGroup) => Ok(CallbackType::SkippedSubmessageStart),
                 Some(WireType::EndGroup) => Ok(CallbackType::SkippedSubmessageEnd),
@@ -1536,7 +1536,7 @@ fn execute_node_action(
                 return Err(RiegeliError::MalformedData(format!(
                     "skipped_submessage_level is {} at record boundary, expected 0",
                     state.skipped_submessage_level
-                )));
+                ).into()));
             }
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
@@ -1634,7 +1634,7 @@ fn skip_field_data(
         (tmpl.tag, tmpl.subtype)
     } else if !node.tag_data.is_empty() {
         let (tag, _) = decode_u32(&node.tag_data)
-            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag for skip: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag for skip: {e}").into()))?;
         (tag, 0u8)
     } else {
         return Ok(());
@@ -1809,7 +1809,7 @@ fn write_existence_only_field(
         (tmpl.tag, tmpl.subtype)
     } else if !node.tag_data.is_empty() {
         let (tag, _) = decode_u32(&node.tag_data)
-            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag: {e}").into()))?;
         (tag, 0u8)
     } else {
         return Ok(());
@@ -1948,7 +1948,7 @@ fn run_state_machine(
             "expected {} records, got {}",
             num_records,
             limits.len()
-        )));
+        ).into()));
     }
     Ok((dest, limits))
 }
@@ -1975,7 +1975,7 @@ fn finalize_records(
         return Err(RiegeliError::MalformedData(format!(
             "last limit {} != total size {}",
             last_limit, total_size
-        )));
+        ).into()));
     }
     // Reverse and complement limits (C++ algorithm).
     {

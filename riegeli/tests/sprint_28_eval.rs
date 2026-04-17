@@ -315,7 +315,7 @@ fn adv_handler_error_during_composition_stops() {
         const FIELD_NUMBER: u32 = 2;
         fn handle_length_delimited(&mut self, _: &[u8]) -> Result<(), riegeli::RiegeliError> {
             Err(riegeli::RiegeliError::MalformedData(
-                "deliberate handler error".to_string(),
+                "deliberate handler error".into(),
             ))
         }
     }

@@ -408,7 +408,7 @@ fn eval_29_stream_error_source_chain() {
 
     let err = StreamError {
         record_index: 7,
-        source: riegeli::RiegeliError::MalformedData("inner error".to_string()),
+        source: riegeli::RiegeliError::MalformedData("inner error".into()),
     };
 
     // Display includes record index

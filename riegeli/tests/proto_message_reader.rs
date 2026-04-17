@@ -189,7 +189,7 @@ impl FieldHandler for ErroringHandler {
     const FIELD_NUMBER: u32 = 1;
 
     fn handle_varint(&mut self, _value: u64) -> Result<(), RiegeliError> {
-        Err(RiegeliError::MalformedData("handler error".to_string()))
+        Err(RiegeliError::MalformedData("handler error".into()))
     }
 }
 
@@ -557,7 +557,7 @@ fn dynamic_handler_error_stops_reading() {
         let f2 = &field2_seen;
         let mut handlers = DynamicHandlerSet::new();
         handlers.on_varint(1, |_| {
-            Err(RiegeliError::MalformedData("dynamic error".to_string()))
+            Err(RiegeliError::MalformedData("dynamic error".into()))
         });
         handlers.on_varint(2, |_| {
             *f2.borrow_mut() = true;

@@ -125,7 +125,7 @@ impl<R: Read + Seek> RecordReader<R> {
         let block_hdr = BlockHeader::from_bytes(bh_bytes);
         if !block_hdr.is_valid() {
             return Err(RiegeliError::MalformedData(
-                "invalid block header hash at offset 0".to_string(),
+                "invalid block header hash at offset 0".into(),
             ));
         }
 
@@ -135,7 +135,7 @@ impl<R: Read + Seek> RecordReader<R> {
         let sig_chunk_hdr = ChunkHeader::from_bytes(ch_bytes);
         if !sig_chunk_hdr.is_header_valid() {
             return Err(RiegeliError::MalformedData(
-                "invalid chunk header hash for signature chunk at offset 24".to_string(),
+                "invalid chunk header hash for signature chunk at offset 24".into(),
             ));
         }
         let sig_chunk_type = sig_chunk_hdr.chunk_type()?;
@@ -143,7 +143,7 @@ impl<R: Read + Seek> RecordReader<R> {
             return Err(RiegeliError::MalformedData(format!(
                 "expected FileSignature chunk at offset 24, got chunk_type={:#04x}",
                 sig_chunk_type as u8
-            )));
+            ).into()));
         }
 
         // Skip the signature chunk's data (should be 0 bytes, but be safe).
@@ -310,7 +310,7 @@ impl<R: Read + Seek> RecordReader<R> {
                         return Err(RiegeliError::MalformedData(format!(
                             "seek: record_index {} is out of range for chunk at {}",
                             pos.record_index, chunk_file_pos
-                        )));
+                        ).into()));
                     }
                 }
             }
@@ -394,7 +394,7 @@ impl<R: Read + Seek> RecordReader<R> {
         match self.read_serialized_metadata()? {
             Some(bytes) => {
                 let msg = crate::RecordsMetadata::parse(&bytes).map_err(|e| {
-                    RiegeliError::MalformedData(format!("failed to parse RecordsMetadata: {e}"))
+                    RiegeliError::MalformedData(format!("failed to parse RecordsMetadata: {e}").into())
                 })?;
                 Ok(Some(msg))
             }
@@ -427,7 +427,7 @@ impl<R: Read + Seek> RecordReader<R> {
         // Validate data hash.
         if !ch.is_data_valid(&data) {
             return Err(RiegeliError::MalformedData(
-                "metadata chunk data hash mismatch".to_string(),
+                "metadata chunk data hash mismatch".into(),
             ));
         }
 
@@ -550,7 +550,7 @@ impl<R: Read + Seek> RecordReader<R> {
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
                     "invalid chunk header at {scan_pos} during search scan"
-                )));
+                ).into()));
             }
 
             let data_size = ch.data_size();
@@ -719,7 +719,7 @@ impl<R: Read + Seek> RecordReader<R> {
                     );
                     return Err(RiegeliError::MalformedData(format!(
                         "invalid block header at {scan_pos} during size scan"
-                    )));
+                    ).into()));
                 }
                 scan_pos += BLOCK_HEADER_SIZE;
             }
@@ -757,7 +757,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 );
                 return Err(RiegeliError::MalformedData(format!(
                     "invalid chunk header at {scan_pos} during size scan"
-                )));
+                ).into()));
             }
 
             let data_size = ch.data_size();
@@ -827,7 +827,7 @@ impl<R: Read + Seek> RecordReader<R> {
         let bh = BlockHeader::from_bytes(bh_bytes);
         if !bh.is_valid() {
             return Err(RiegeliError::MalformedData(
-                "invalid block header hash at offset 0".to_string(),
+                "invalid block header hash at offset 0".into(),
             ));
         }
 
@@ -848,7 +848,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 if !bh.is_valid() {
                     return Err(RiegeliError::MalformedData(format!(
                         "invalid block header hash at offset {scan_pos}"
-                    )));
+                    ).into()));
                 }
                 scan_pos += BLOCK_HEADER_SIZE;
             }
@@ -866,7 +866,7 @@ impl<R: Read + Seek> RecordReader<R> {
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
                     "invalid chunk header hash at offset {scan_pos}"
-                )));
+                ).into()));
             }
 
             let data_size = ch.data_size();
@@ -877,7 +877,7 @@ impl<R: Read + Seek> RecordReader<R> {
             if !ch.is_data_valid(&chunk_data) {
                 return Err(RiegeliError::MalformedData(format!(
                     "chunk data hash mismatch at offset {scan_pos}"
-                )));
+                ).into()));
             }
 
             // Advance past this chunk.
@@ -945,7 +945,7 @@ impl<R: Read + Seek> RecordReader<R> {
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
                     "invalid chunk header hash at file position {data_start}"
-                )));
+                ).into()));
             }
 
             let data_size = ch.data_size();
@@ -967,7 +967,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 self.next_chunk_file_pos = data_start;
                 return Err(RiegeliError::MalformedData(format!(
                     "chunk data hash mismatch at file position {data_start}"
-                )));
+                ).into()));
             }
 
             // Update state for the next chunk.
@@ -1037,7 +1037,7 @@ impl<R: Read + Seek> RecordReader<R> {
         if !bh.is_valid() {
             return Err(RiegeliError::MalformedData(format!(
                 "invalid block header hash at file position {pos}"
-            )));
+            ).into()));
         }
 
         Ok(pos + BLOCK_HEADER_SIZE)
@@ -1065,7 +1065,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 if !bh.is_valid() {
                     return Err(RiegeliError::MalformedData(format!(
                         "invalid block header hash at file position {file_pos} (during data read)"
-                    )));
+                    ).into()));
                 }
                 file_pos += BLOCK_HEADER_SIZE;
                 // Seek to data position after the block header.
@@ -1111,7 +1111,7 @@ impl<R: Read + Seek> RecordReader<R> {
         if !ch.is_header_valid() {
             return Err(RiegeliError::MalformedData(format!(
                 "invalid chunk header hash at file position {data_start}"
-            )));
+            ).into()));
         }
 
         let data_size = ch.data_size();
@@ -1120,7 +1120,7 @@ impl<R: Read + Seek> RecordReader<R> {
         if !ch.is_data_valid(&chunk_data) {
             return Err(RiegeliError::MalformedData(format!(
                 "chunk data hash mismatch at file position {data_start}"
-            )));
+            ).into()));
         }
 
         self.current_chunk_begin = data_start;

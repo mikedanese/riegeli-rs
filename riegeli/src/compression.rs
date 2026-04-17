@@ -70,7 +70,7 @@ pub(crate) fn compress_brotli(
         let mut writer = brotli::CompressorWriter::new(&mut output, 4096, quality, lgwin);
         writer
             .write_all(input)
-            .map_err(|e| RiegeliError::MalformedData(format!("brotli compress error: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("brotli compress error: {e}").into()))?;
     }
     Ok(output)
 }
@@ -86,7 +86,7 @@ pub(crate) fn decompress_brotli(
     let mut reader = brotli::Decompressor::new(input, 4096);
     reader
         .read_to_end(&mut output)
-        .map_err(|e| RiegeliError::MalformedData(format!("brotli decompress error: {e}")))?;
+        .map_err(|e| RiegeliError::MalformedData(format!("brotli decompress error: {e}").into()))?;
     Ok(output)
 }
 
@@ -100,21 +100,21 @@ pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u
         let mut output = Vec::new();
         {
             let mut encoder = zstd::Encoder::new(&mut output, level)
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd encoder init: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("zstd encoder init: {e}").into()))?;
             encoder
                 .window_log(wlog)
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd window_log: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("zstd window_log: {e}").into()))?;
             encoder
                 .write_all(input)
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}").into()))?;
             encoder
                 .finish()
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd finish error: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("zstd finish error: {e}").into()))?;
         }
         output
     } else {
         zstd::encode_all(input, level)
-            .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}")))?
+            .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}").into()))?
     };
     Ok(compressed)
 }
@@ -123,7 +123,7 @@ pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u
 #[cfg(feature = "zstd")]
 pub(crate) fn decompress_zstd(input: &[u8]) -> Result<Vec<u8>, RiegeliError> {
     zstd::decode_all(input)
-        .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}")))
+        .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}").into()))
 }
 
 /// Compress bytes using Snappy.
@@ -132,7 +132,7 @@ pub(crate) fn compress_snappy(input: &[u8]) -> Result<Vec<u8>, RiegeliError> {
     let mut encoder = snap::raw::Encoder::new();
     encoder
         .compress_vec(input)
-        .map_err(|e| RiegeliError::MalformedData(format!("snappy compress error: {e}")))
+        .map_err(|e| RiegeliError::MalformedData(format!("snappy compress error: {e}").into()))
 }
 
 /// Decompress Snappy bytes.
@@ -141,7 +141,7 @@ pub(crate) fn decompress_snappy(input: &[u8]) -> Result<Vec<u8>, RiegeliError> {
     let mut decoder = snap::raw::Decoder::new();
     decoder
         .decompress_vec(input)
-        .map_err(|e| RiegeliError::MalformedData(format!("snappy decompress error: {e}")))
+        .map_err(|e| RiegeliError::MalformedData(format!("snappy decompress error: {e}").into()))
 }
 
 /// Compress data using the specified compression type and options.
@@ -258,7 +258,7 @@ pub(crate) fn decompress_with_prefix(
     }
     // Strip the varint64(uncompressed_size) prefix.
     let (_uncompressed_size, consumed) = decode_u64(data).map_err(|e| {
-        RiegeliError::MalformedData(format!("reading uncompressed_size prefix: {e}"))
+        RiegeliError::MalformedData(format!("reading uncompressed_size prefix: {e}").into())
     })?;
     decompress_raw(&data[consumed..], compression)
 }

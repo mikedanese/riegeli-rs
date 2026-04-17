@@ -1335,13 +1335,13 @@ impl TransposeChunkEncoder {
         while pos < current_end {
             // Read tag.
             let (tag, consumed) = decode_u32(&data[pos..])
-                .map_err(|e| RiegeliError::MalformedData(format!("tag decode: {e}")))?;
+                .map_err(|e| RiegeliError::MalformedData(format!("tag decode: {e}").into()))?;
             pos += consumed;
 
             let field_num = tag_field_number(tag);
             if field_num == 0 {
                 return Err(RiegeliError::MalformedData(
-                    "field number 0 in proto".to_string(),
+                    "field number 0 in proto".into(),
                 ));
             }
 
@@ -1389,14 +1389,14 @@ impl TransposeChunkEncoder {
                 None => {
                     return Err(RiegeliError::MalformedData(format!(
                         "invalid wire type in tag {tag}"
-                    )));
+                    ).into()));
                 }
             }
 
             // At the end of a submessage, pop the stack.
             while pos >= current_end && !message_stack.is_empty() {
                 let frame = message_stack.pop().ok_or_else(|| {
-                    RiegeliError::MalformedData("message stack empty".to_string())
+                    RiegeliError::MalformedData("message stack empty".into())
                 })?;
                 self.encoded_tags.push(frame.end_sub_tag_idx);
                 current_parent = frame.parent_message_id;
@@ -1417,7 +1417,7 @@ impl TransposeChunkEncoder {
     ) -> Result<(), RiegeliError> {
         let varint_start = *pos;
         let (_, vlen) = decode_u64(&data[*pos..])
-            .map_err(|e| RiegeliError::MalformedData(format!("varint value: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("varint value: {e}").into()))?;
         let varint_bytes = &data[varint_start..varint_start + vlen];
         *pos += vlen;
 
@@ -1450,7 +1450,7 @@ impl TransposeChunkEncoder {
         node_id: NodeId,
     ) -> Result<(), RiegeliError> {
         if *pos + 4 > data.len() {
-            return Err(RiegeliError::MalformedData("truncated fixed32".to_string()));
+            return Err(RiegeliError::MalformedData("truncated fixed32".into()));
         }
         let idx = self.get_pos_in_tags_list(node_id, subtype::TRIVIAL);
         self.encoded_tags.push(idx);
@@ -1470,7 +1470,7 @@ impl TransposeChunkEncoder {
         node_id: NodeId,
     ) -> Result<(), RiegeliError> {
         if *pos + 8 > data.len() {
-            return Err(RiegeliError::MalformedData("truncated fixed64".to_string()));
+            return Err(RiegeliError::MalformedData("truncated fixed64".into()));
         }
         let idx = self.get_pos_in_tags_list(node_id, subtype::TRIVIAL);
         self.encoded_tags.push(idx);
@@ -1502,14 +1502,14 @@ impl TransposeChunkEncoder {
     ) -> Result<Option<MessageFrame>, RiegeliError> {
         let length_pos = *pos;
         let (length, llen) = decode_u32(&data[*pos..])
-            .map_err(|e| RiegeliError::MalformedData(format!("length: {e}")))?;
+            .map_err(|e| RiegeliError::MalformedData(format!("length: {e}").into()))?;
         *pos += llen;
         let value_pos = *pos;
         let value_end = *pos + length as usize;
 
         if value_end > current_end {
             return Err(RiegeliError::MalformedData(
-                "length-delimited field overflow".to_string(),
+                "length-delimited field overflow".into(),
             ));
         }
 

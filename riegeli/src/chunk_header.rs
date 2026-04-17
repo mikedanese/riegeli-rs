@@ -147,7 +147,7 @@ impl ChunkHeader {
             b't' => Ok(ChunkType::Transposed),
             _ => Err(RiegeliError::MalformedData(format!(
                 "unknown chunk type byte: {byte:#04x}"
-            ))),
+            ).into())),
         }
     }
 

@@ -253,7 +253,7 @@ impl<W: Write + Seek> RecordWriter<W> {
                     return Err(RiegeliError::MalformedData(format!(
                         "window_log is not applicable to compression type {:?}",
                         options.compression
-                    )));
+                    ).into()));
                 }
                 _ => {}
             }

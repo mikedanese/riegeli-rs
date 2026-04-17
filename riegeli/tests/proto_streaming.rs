@@ -327,7 +327,7 @@ fn criterion_29_5_handler_error_includes_record_index() {
     handlers.on_varint(1, |v| {
         if v == 5 {
             Err(riegeli::RiegeliError::MalformedData(
-                "intentional test error".to_string(),
+                "intentional test error".into(),
             ))
         } else {
             Ok(())
@@ -359,7 +359,7 @@ fn criterion_29_5_error_at_first_record() {
     let mut handlers = DynamicHandlerSet::new();
     handlers.on_varint(1, |_v| {
         Err(riegeli::RiegeliError::MalformedData(
-            "fail immediately".to_string(),
+            "fail immediately".into(),
         ))
     });
 
@@ -646,7 +646,7 @@ fn adversarial_filter_preserves_empty_proto_records() {
 fn adversarial_stream_error_display() {
     let err = StreamError {
         record_index: 42,
-        source: riegeli::RiegeliError::MalformedData("test".to_string()),
+        source: riegeli::RiegeliError::MalformedData("test".into()),
     };
     let s = format!("{err}");
     assert!(s.contains("record index 42"));

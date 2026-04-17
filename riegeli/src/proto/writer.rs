@@ -62,7 +62,7 @@ impl SerializedMessageWriter {
             return Err(crate::RiegeliError::MalformedData(format!(
                 "finish() called with {} unclosed length-delimited scope(s)",
                 self.scope_stack.len()
-            )));
+            ).into()));
         }
         Ok(self.buf)
     }
@@ -233,7 +233,7 @@ impl SerializedMessageWriter {
             return Err(crate::RiegeliError::MalformedData(format!(
                 "length-delimited field length {} exceeds 2 GiB limit",
                 data.len()
-            )));
+            ).into()));
         }
         encode_tag(&mut self.buf, field_number, WireType::LengthDelimited);
         encode_varint32(&mut self.buf, data.len() as u32);
@@ -271,7 +271,7 @@ impl SerializedMessageWriter {
     pub fn close_length_delimited(&mut self) -> Result<(), crate::RiegeliError> {
         let content_start = self.scope_stack.pop().ok_or_else(|| {
             crate::RiegeliError::MalformedData(
-                "close_length_delimited() called without matching open".to_string(),
+                "close_length_delimited() called without matching open".into(),
             )
         })?;
 
@@ -280,7 +280,7 @@ impl SerializedMessageWriter {
             return Err(crate::RiegeliError::MalformedData(format!(
                 "length-delimited field length {} exceeds 2 GiB limit",
                 content_len
-            )));
+            ).into()));
         }
 
         // Encode the length varint into a temporary buffer, then splice it in.
