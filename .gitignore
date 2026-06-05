@@ -3,3 +3,7 @@
 /artifacts
 /scratch
 *.proptest-regressions
+# The regen helper is its own workspace; keep its local target out too
+# (the script points CARGO_TARGET_DIR at the workspace root, this is the
+# belt-and-braces for running cargo in that directory directly).
+scripts/regen-proto/target/

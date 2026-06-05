@@ -13,11 +13,18 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protoc
+      - name: Assert no protoc on PATH
+        # The generated protobuf code is checked in; building and testing
+        # the library must not depend on protoc. Remove any preinstalled
+        # copy so the invariant is enforced, not just assumed — a runner
+        # image that ships protoc would otherwise mask a regrown protoc
+        # dependency.
         run: |
-          curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
-          unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
-          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+          while command -v protoc; do sudo rm -f "$(command -v protoc)"; done
+          if command -v protoc; then
+            echo "protoc still on PATH — build must not depend on it" >&2
+            exit 1
+          fi
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -53,9 +60,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protoc
+      - name: Install protoc 34.1 (checksum-pinned)
         run: |
           curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
+          echo "af27ea66cd26938fe48587804ca7d4817457a08350021a1c6e23a27ccc8c6904  /tmp/protoc.zip" | sha256sum -c -
           unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
           sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
 
@@ -69,3 +77,32 @@ jobs:
 
       - name: Test FFI
         run: cargo test -p riegeli-ffi
+
+  proto-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc 34.1 (checksum-pinned)
+        run: |
+          curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
+          echo "af27ea66cd26938fe48587804ca7d4817457a08350021a1c6e23a27ccc8c6904  /tmp/protoc.zip" | sha256sum -c -
+          unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
+          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+
+      - name: Regenerate protobuf code
+        run: ./scripts/regen-proto.sh
+
+      - name: Fail on drift between .proto sources and checked-in code
+        # git diff alone ignores untracked files — a future protoc emitting a
+        # NEW output file would pass silently. Check the porcelain status too.
+        run: |
+          git diff --exit-code riegeli/src/proto_generated riegeli/proto
+          if [ -n "$(git status --porcelain riegeli/src/proto_generated riegeli/proto)" ]; then
+            echo "untracked or modified files after regeneration:" >&2
+            git status --porcelain riegeli/src/proto_generated riegeli/proto >&2
+            exit 1
+          fi

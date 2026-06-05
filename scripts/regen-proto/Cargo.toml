@@ -1,0 +1,12 @@
+[package]
+name = "proto-regen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+protobuf-codegen = "=4.34.1-release"
+
+# Standalone on purpose: not a member of the repository workspace, so
+# building the library crates never builds (or needs) the codegen toolchain.
+[workspace]
