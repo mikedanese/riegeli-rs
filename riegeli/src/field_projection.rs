@@ -242,9 +242,10 @@ fn apply_projection_inner(record: &[u8], projection: &FieldProjection) -> Vec<u8
                     out.push(0x00); // zero-length string
                 }
                 WireType::StartGroup | WireType::EndGroup => {
-                    // For groups: just emit the start tag and end tag with zero content.
-                    // Find the matching EndGroup.
-                    out.extend_from_slice(&tag_bytes); // start group already in tag_bytes
+                    // The start tag was already emitted above; an
+                    // existence-only group is exactly start tag + matching
+                    // end tag with no content. (Emitting the start tag
+                    // again here produced an unbalanced group.)
                     let end_tag = encode_u32((field_number << 3) | (WireType::EndGroup as u32));
                     out.extend_from_slice(&end_tag);
                 }
@@ -474,6 +475,23 @@ mod tests {
         let tag_bytes = encode_u32(make_tag(1, WireType::Varint));
         let mut expected = tag_bytes;
         expected.push(0x00);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_existence_only_group_emits_balanced_tags() {
+        // Build: group field 2 containing a varint field.
+        let mut record = Vec::new();
+        record.extend_from_slice(&encode_u32(make_tag(2, WireType::StartGroup)));
+        record.extend_from_slice(&encode_varint_field(3, 7)); // group content
+        record.extend_from_slice(&encode_u32(make_tag(2, WireType::EndGroup)));
+
+        let proj = FieldProjection::new().add_field(Field::new(vec![2]).existence_only());
+        let result = proj.apply(&record);
+
+        // Exactly one start tag and one end tag, no content, no duplicate.
+        let mut expected = encode_u32(make_tag(2, WireType::StartGroup));
+        expected.extend_from_slice(&encode_u32(make_tag(2, WireType::EndGroup)));
         assert_eq!(result, expected);
     }
 
