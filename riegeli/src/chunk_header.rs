@@ -158,10 +158,12 @@ impl ChunkHeader {
 
     /// The `decoded_data_size` field: total uncompressed size of all records.
     ///
-    /// Decoders enforce this claim exactly and incrementally, so decompressed
-    /// output can never exceed it. A caller wanting its own policy bound on
-    /// decoded size can check this value (from a hash-validated header)
-    /// before decoding the chunk.
+    /// Decoders enforce this claim exactly and incrementally, and cap
+    /// decompression output at the relevant declared size, so neither the
+    /// decoded records nor the intermediate decompression buffers can grow
+    /// past what the (hash-validated) header and section prefixes claim. A
+    /// caller wanting its own policy bound on decode size can check this
+    /// value before decoding the chunk.
     pub fn decoded_data_size(&self) -> u64 {
         self.decoded_data_size
     }
