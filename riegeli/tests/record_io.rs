@@ -14,7 +14,7 @@ use std::io::{Cursor, Seek, SeekFrom, Write};
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A Write + Seek wrapper around Vec<u8>.
+/// A Write wrapper around Vec<u8>.
 struct VecWriter {
     data: Vec<u8>,
 }
@@ -32,12 +32,6 @@ impl Write for VecWriter {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
-    }
-}
-
-impl Seek for VecWriter {
-    fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-        Ok(self.data.len() as u64)
     }
 }
 

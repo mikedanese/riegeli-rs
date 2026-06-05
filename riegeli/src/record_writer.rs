@@ -1,4 +1,4 @@
-//! `RecordWriter` — writes a Riegeli file to any `Write + Seek` sink.
+//! `RecordWriter` — writes a Riegeli file to any `Write` sink.
 //!
 //! ## File layout produced
 //!
@@ -14,7 +14,7 @@
 //! `BlockHeader` bytes are interleaved transparently so that `file_pos` always
 //! reflects the true offset in the underlying `Write` stream.
 
-use std::io::{Seek, Write};
+use std::io::Write;
 
 use crate::block_arithmetic::add_with_overhead;
 use crate::block_header::BlockHeader;
@@ -207,7 +207,7 @@ impl ActiveEncoder {
 ///
 /// Records are accumulated into chunks up to `chunk_size` bytes, then flushed.
 /// Block headers are inserted at every 65536-byte boundary in the output stream.
-pub struct RecordWriter<W: Write + Seek> {
+pub struct RecordWriter<W: Write> {
     /// The underlying writer.
     writer: W,
     /// Compression type for data chunks.
@@ -238,7 +238,7 @@ pub struct RecordWriter<W: Write + Seek> {
     closed: bool,
 }
 
-impl<W: Write + Seek> RecordWriter<W> {
+impl<W: Write> RecordWriter<W> {
     /// Create a new `RecordWriter`.
     ///
     /// Immediately writes the initial block header and the file signature chunk.
@@ -596,7 +596,7 @@ impl<W: Write + Seek> RecordWriter<W> {
     }
 }
 
-impl<W: Write + Seek> Drop for RecordWriter<W> {
+impl<W: Write> Drop for RecordWriter<W> {
     fn drop(&mut self) {
         let _ = self.flush_internal();
     }
@@ -604,7 +604,6 @@ impl<W: Write + Seek> Drop for RecordWriter<W> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::SeekFrom;
 
     use super::*;
     use crate::block_header::BlockHeader;
@@ -624,12 +623,6 @@ mod tests {
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
-            }
-        }
-        impl Seek for BufWriter {
-            fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-                // We don't actually use seek in the writer — we just need the trait bound.
-                Ok(self.data.len() as u64)
             }
         }
 
@@ -698,11 +691,6 @@ mod tests {
                 }
                 fn flush(&mut self) -> std::io::Result<()> {
                     Ok(())
-                }
-            }
-            impl Seek for RefWriter<'_> {
-                fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
-                    Ok(self.data.borrow().len() as u64)
                 }
             }
 

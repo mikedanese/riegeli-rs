@@ -153,7 +153,7 @@ mod tests {
     use crate::constants::{BLOCK_HEADER_SIZE, BLOCK_SIZE, CHUNK_HEADER_SIZE};
     use crate::record_writer::{RecordWriter, WriterOptions};
     use crate::simple_chunk::{Chunk, SimpleChunkDecoder};
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::Write;
 
     struct VecWriter {
         data: Vec<u8>,
@@ -172,12 +172,6 @@ mod tests {
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-
-    impl Seek for VecWriter {
-        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-            Ok(self.data.len() as u64)
         }
     }
 

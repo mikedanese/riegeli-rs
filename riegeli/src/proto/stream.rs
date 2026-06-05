@@ -179,7 +179,7 @@ pub fn filter_fields_to_writer<R, W>(
 ) -> Result<(), StreamError>
 where
     R: Read + Seek,
-    W: Write + Seek,
+    W: Write,
 {
     let mut record_index: usize = 0;
 
