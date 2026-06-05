@@ -60,13 +60,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protoc 34.1 (checksum-pinned)
-        run: |
-          curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v34.1/protoc-34.1-linux-x86_64.zip -o /tmp/protoc.zip
-          echo "af27ea66cd26938fe48587804ca7d4817457a08350021a1c6e23a27ccc8c6904  /tmp/protoc.zip" | sha256sum -c -
-          unzip -o /tmp/protoc.zip bin/protoc -d /tmp/protoc
-          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
-
       - name: Cache FFI build
         uses: actions/cache@v4
         with:

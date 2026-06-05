@@ -67,7 +67,8 @@ impl ReaderOptions {
     /// Divergences from the C++ `set_recovery`
     /// (`std::function<bool(const SkippedRegion&, RecordReaderBase&)>`):
     ///
-    /// - No reader parameter (see the type-alias note); use
+    /// - No reader parameter: the reader owns the callback, so passing it a
+    ///   mutable reference would alias. Use
     ///   [`RecordReader::last_skipped_region`] after a cancelled call.
     /// - Cancelling follows the C++ shape: the region is already skipped
     ///   when the callback runs, so returning `false` reports the error

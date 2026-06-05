@@ -14,7 +14,7 @@ field filled with a repeating pattern for realistic compressibility.
 ### Run all benchmarks
 
 ```bash
-cargo bench --bench throughput --features snappy
+cargo bench --bench throughput --features "brotli zstd snappy"
 ```
 
 ### Run a single configuration
