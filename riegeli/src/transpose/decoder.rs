@@ -86,6 +86,11 @@ enum CallbackType {
     /// A submessage-end node for an excluded submessage: increments
     /// `skipped_submessage_level` instead of pushing a frame onto the stack.
     SkippedSubmessageEnd,
+    /// Existence-only submessage end: the interior is skipped (like
+    /// SkippedSubmessageEnd) but a frame is pushed so the matching start
+    /// writes the submessage tag with length zero — existence-only means
+    /// tag + empty content, not silent omission.
+    ExistenceOnlySubmessageEnd,
     /// A submessage-start node for an excluded submessage: decrements
     /// `skipped_submessage_level` instead of popping and writing a header.
     SkippedSubmessageStart,
@@ -786,7 +791,9 @@ impl TransposeChunkDecoder {
                     // Check if this buffer is needed.
                     let needed_for_field = match field_number_opt {
                         None => true, // nonproto — always needed
-                        Some(fn_num) => projection.includes_top_level_field(fn_num),
+                        // Any-depth match: nested-path inner fields carry
+                        // their own tags (see mentions_field docs).
+                        Some(fn_num) => projection.mentions_field(fn_num),
                     };
                     if needed_for_field {
                         needed[buf_idx] = true;
@@ -1498,7 +1505,10 @@ fn callback_for_field_included(
                 Some(WireType::LengthDelimited)
                     if st == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE =>
                 {
-                    Ok(CallbackType::SkippedSubmessageEnd)
+                    // Emit tag + zero length for the submessage itself while
+                    // skipping its contents — the simple-chunk path emits
+                    // tag + 0x00 and the docs promise the same here.
+                    Ok(CallbackType::ExistenceOnlySubmessageEnd)
                 }
                 _ => Ok(CallbackType::ExistenceOnly),
             }
@@ -1511,6 +1521,10 @@ struct DecodeState<'a> {
     dest: &'a mut BackwardBuffer,
     buffers: &'a mut [BufferCursor],
     submessage_stack: &'a mut Vec<SubmessageFrame>,
+    /// Skip levels at which an existence-only submessage frame was pushed:
+    /// the matching start at that level writes the zero-length header
+    /// instead of silently un-skipping.
+    existence_only_levels: &'a mut Vec<i32>,
     limits: &'a mut Vec<usize>,
     num_records: u64,
     nonproto_lengths_index: Option<usize>,
@@ -1639,6 +1653,14 @@ fn execute_node_action(
         CallbackType::SkippedSubmessageEnd => {
             state.skipped_submessage_level += 1;
         }
+        CallbackType::ExistenceOnlySubmessageEnd => {
+            state.submessage_stack.push(SubmessageFrame {
+                end_pos: state.dest.pos(),
+                node_index: current_node_idx,
+            });
+            state.skipped_submessage_level += 1;
+            state.existence_only_levels.push(state.skipped_submessage_level);
+        }
         // Projection-aware: excluded submessage start — decrement skip level,
         // no stack pop, no output bytes.
         CallbackType::SkippedSubmessageStart => {
@@ -1646,6 +1668,13 @@ fn execute_node_action(
                 return Err(RiegeliError::MalformedData(
                     "skipped submessage stack underflow".into(),
                 ));
+            }
+            // If this start matches an existence-only end, write the
+            // submessage tag with its (empty — the interior was skipped)
+            // length instead of silently un-skipping.
+            if state.existence_only_levels.last() == Some(&state.skipped_submessage_level) {
+                state.existence_only_levels.pop();
+                write_submessage_header(state.dest, nodes, state.submessage_stack)?;
             }
             state.skipped_submessage_level -= 1;
         }
@@ -1965,6 +1994,7 @@ fn run_state_machine(
     // per record is pushed by the bounded transition loop below).
     let mut limits: Vec<usize> = Vec::with_capacity((num_records as usize).min(1 << 16));
     let mut submessage_stack: Vec<SubmessageFrame> = Vec::new();
+    let mut existence_only_levels: Vec<i32> = Vec::new();
     let mut current_node_idx = first_node;
     let mut num_iters: i32 = if nodes[current_node_idx].is_implicit {
         1
@@ -1977,6 +2007,7 @@ fn run_state_machine(
             dest: &mut dest,
             buffers,
             submessage_stack: &mut submessage_stack,
+            existence_only_levels: &mut existence_only_levels,
             limits: &mut limits,
             num_records,
             nonproto_lengths_index,
