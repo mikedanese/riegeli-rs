@@ -811,7 +811,11 @@ impl TransposeChunkDecoder {
     ) -> Result<(Vec<Vec<u8>>, usize), RiegeliError> {
         let mut bucket_compressed_data = Vec::with_capacity(bucket_compressed_sizes.len());
         for &size in bucket_compressed_sizes {
-            let end = pos + size;
+            // checked_add: size is attacker-claimed; a wrapping add would
+            // let the bounds check pass and the slice below panic.
+            let end = pos.checked_add(size).ok_or_else(|| {
+                RiegeliError::MalformedData("bucket size overflows".into())
+            })?;
             if end > data.len() {
                 return Err(RiegeliError::MalformedData(
                     "bucket data extends past chunk data".into(),
@@ -908,8 +912,17 @@ impl TransposeChunkDecoder {
         let num_buckets = bucket_compressed_data.len();
         let num_buffers = buffer_uncompressed_sizes.len();
 
-        if num_buckets == 0 || num_buffers == 0 {
+        if num_buffers == 0 {
             return Ok(Vec::new());
+        }
+        // Buffers live inside buckets; claiming buffers with no buckets is
+        // malformed. Returning an empty buffer set here instead would let
+        // nodes whose buffer_index was validated against num_buffers index
+        // out of bounds at decode time (found by fuzzing).
+        if num_buckets == 0 {
+            return Err(RiegeliError::MalformedData(
+                "transpose chunk claims buffers but no buckets".into(),
+            ));
         }
 
         // Step 1: Compute which buffer belongs to which bucket.
@@ -1058,9 +1071,12 @@ impl TransposeChunkDecoder {
             nodes.push(node);
         }
 
-        // Read first_node.
+        // Read first_node. The bound applies even when num_states == 0: a
+        // chunk that claims records but no states has nowhere valid to
+        // start, and an unchecked first_node would index out of bounds
+        // into the sentinel-only node table (found by fuzzing).
         let first_node = hdr.read_varint32()? as usize;
-        if num_states > 0 && first_node >= num_states {
+        if first_node >= num_states {
             return Err(RiegeliError::MalformedData(format!(
                 "first_node {} >= num_states {}",
                 first_node, num_states
@@ -2122,6 +2138,73 @@ fn contains_implicit_loop(nodes: &[StateMachineNode], _num_states: usize) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fuzzer-found: a header claiming buffers but zero buckets produced an
+    /// empty buffer set, while nodes' buffer indices had been validated
+    /// against the claimed (nonzero) buffer count — decode then indexed out
+    /// of bounds. Input reduced from the failing fuzz input.
+    #[test]
+    fn hostile_buffers_without_buckets_are_rejected() {
+        let body: Vec<u8> = vec![
+            0x00, 0x7A, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x0A, 0x00, 0x7A, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+        ];
+        let header = crate::chunk_header::ChunkHeader::from_parts(
+            &body,
+            crate::chunk_header::ChunkType::Transposed,
+            38,
+            2597,
+        );
+        let chunk = crate::simple_chunk::Chunk { header, data: body };
+        let err = match TransposeChunkDecoder::new_with_projection(chunk, None) {
+            Err(e) => e,
+            Ok(mut d) => loop {
+                match d.read_record() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => panic!("hostile chunk decoded successfully"),
+                    Err(e) => break e,
+                }
+            },
+        };
+        assert!(
+            err.to_string().contains("buffers but no buckets"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Fuzzer-found: with num_states == 0 the first_node bound was skipped,
+    /// and any first_node indexed out of bounds into the sentinel-only node
+    /// table. Minimal construction: zero buckets, buffers, and states, with
+    /// an out-of-range first_node (the original failing fuzz input also claimed
+    /// buffers without buckets, which a separate fix now rejects earlier —
+    /// see hostile_buffers_without_buckets_are_rejected).
+    #[test]
+    fn hostile_first_node_with_zero_states_is_rejected() {
+        // chunk data: [compression=None][varint header_len=5]
+        // header blob: num_buckets=0, num_buffers=0, num_states=0,
+        //              first_node = varint(598)
+        let body: &[u8] = &[0x00, 0x05, 0x00, 0x00, 0x00, 0xD6, 0x04];
+        let header = crate::chunk_header::ChunkHeader::from_parts(
+            body,
+            crate::chunk_header::ChunkType::Transposed,
+            1,
+            0,
+        );
+        let chunk = crate::simple_chunk::Chunk { header, data: body.to_vec() };
+        let err = TransposeChunkDecoder::new_with_projection(chunk, None)
+            .err()
+            .expect("zero-state chunk with hostile first_node must error");
+        assert!(
+            err.to_string().contains("first_node"),
+            "unexpected error: {err}"
+        );
+    }
 
     /// A transposed chunk whose header under-claims decoded_data_size must
     /// fail during decode ("larger than expected"), not produce output

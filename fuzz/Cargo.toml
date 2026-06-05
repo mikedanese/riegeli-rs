@@ -1,0 +1,39 @@
+[package]
+name = "riegeli-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+riegeli = { path = "../riegeli" }
+
+[[bin]]
+name = "read_records"
+path = "fuzz_targets/read_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transpose_decode"
+path = "fuzz_targets/transpose_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "varint"
+path = "fuzz_targets/varint.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone on purpose — not a member of the repository workspace.
+[workspace]
+
+[profile.release]
+debug = 1

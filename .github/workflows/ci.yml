@@ -106,3 +106,30 @@ jobs:
             git status --porcelain riegeli/src/proto_generated riegeli/proto >&2
             exit 1
           fi
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.1
+
+      - name: Build fuzz targets
+        run: cargo fuzz build
+
+      - name: Seed the reader corpus
+        run: |
+          mkdir -p fuzz/corpus/read_records
+          cp riegeli/testdata/boundary/*.riegeli fuzz/corpus/read_records/
+
+      - name: Smoke-run each target
+        # Brief runs to catch immediately-reachable findings; real fuzzing
+        # time is spent locally or on a dedicated runner (see fuzz/README.md).
+        run: |
+          cargo fuzz run read_records    -- -max_total_time=20 -max_len=262144
+          cargo fuzz run transpose_decode -- -max_total_time=20
+          cargo fuzz run varint          -- -max_total_time=10 -max_len=64
