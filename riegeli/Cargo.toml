@@ -21,6 +21,7 @@ exclude = [
     "tests/conformance.rs",
     "tests/common/",
     "tests/benchmark_correctness.rs",
+    "tests/differential.rs",
     "tests/cross_lang_roundtrip.rs",
     "tests/proto_streaming.rs",
     "tests/recovery.rs",

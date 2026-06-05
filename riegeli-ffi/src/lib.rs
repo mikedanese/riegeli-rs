@@ -44,6 +44,22 @@ mod ffi {
             reader: Pin<&mut StringRecordReader>,
             metadata_out: &mut Vec<u8>,
         ) -> bool;
+
+        // Differential-testing surface: reader with projection and
+        // region-collecting recovery, plus the collected-region accessors
+        // and a numeric position probe.
+        fn new_record_reader_with_options(
+            input: &[u8],
+            projection_paths_flat: &[u32],
+            collect_recovery: bool,
+            cancel_after: i32,
+        ) -> UniquePtr<StringRecordReader>;
+        fn reader_skipped_count(reader: &StringRecordReader) -> usize;
+        fn reader_skipped_begin(reader: &StringRecordReader, i: usize) -> u64;
+        fn reader_skipped_end(reader: &StringRecordReader, i: usize) -> u64;
+        fn reader_skipped_message(reader: &StringRecordReader, i: usize) -> String;
+        fn reader_pos_numeric(reader: &StringRecordReader) -> u64;
+        fn reader_seek_numeric(reader: Pin<&mut StringRecordReader>, pos: u64) -> bool;
     }
 }
 
@@ -359,5 +375,76 @@ mod tests {
         let got = reader.read_serialized_metadata().unwrap();
         assert!(got.is_none());
         reader.close().unwrap();
+    }
+}
+
+/// A projection path for the differential-testing reader. Existence-only is
+/// expressed the C++ way: a trailing `0` (`Field::kExistenceOnly`) on the
+/// path — the Rust-side flag maps to `path + [0]` at this boundary.
+pub type ProjectionPath = Vec<u32>;
+
+/// A skipped region collected from the C++ reader's recovery callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CppSkippedRegion {
+    pub begin: u64,
+    pub end: u64,
+    pub message: String,
+}
+
+impl RecordReader {
+    /// Create a reader with a field projection and/or collecting recovery,
+    /// for differential testing against the Rust implementation.
+    ///
+    /// `cancel_after`: with recovery, cancel (return false from the C++
+    /// callback) after this many regions; `None` = never cancel.
+    pub fn with_options(
+        data: &[u8],
+        projection: &[ProjectionPath],
+        collect_recovery: bool,
+        cancel_after: Option<u32>,
+    ) -> Result<Self, String> {
+        let mut flat: Vec<u32> = Vec::new();
+        for (i, path) in projection.iter().enumerate() {
+            if i > 0 {
+                flat.push(0xFFFF_FFFF);
+            }
+            flat.extend_from_slice(path);
+        }
+        let inner = ffi::new_record_reader_with_options(
+            data,
+            &flat,
+            collect_recovery,
+            cancel_after.map_or(-1, |n| n as i32),
+        );
+        if inner.is_null() {
+            return Err("failed to create reader".into());
+        }
+        if !ffi::reader_ok(&inner) {
+            return Err(ffi::reader_status_message(&inner));
+        }
+        Ok(Self { inner })
+    }
+
+    /// The regions the C++ recovery callback collected so far.
+    pub fn skipped_regions(&self) -> Vec<CppSkippedRegion> {
+        let n = ffi::reader_skipped_count(&self.inner);
+        (0..n)
+            .map(|i| CppSkippedRegion {
+                begin: ffi::reader_skipped_begin(&self.inner, i),
+                end: ffi::reader_skipped_end(&self.inner, i),
+                message: ffi::reader_skipped_message(&self.inner, i),
+            })
+            .collect()
+    }
+
+    /// The reader's current numeric position.
+    pub fn pos_numeric(&self) -> u64 {
+        ffi::reader_pos_numeric(&self.inner)
+    }
+
+    /// Seek to a numeric position. Returns the C++ Seek result (false on
+    /// failure OR on a cancelled recovery; check ok() to distinguish).
+    pub fn seek_numeric(&mut self, pos: u64) -> bool {
+        ffi::reader_seek_numeric(self.inner.pin_mut(), pos)
     }
 }
