@@ -17,9 +17,6 @@ brotli = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 snap = { workspace = true, optional = true }
 
-[build-dependencies]
-protobuf-codegen = { workspace = true }
-
 [features]
 default = ["zstd"]
 brotli = ["dep:brotli"]
