@@ -17,6 +17,10 @@ brotli = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 snap = { workspace = true, optional = true }
 
+[lints.rust]
+# cargo-fuzz builds pass --cfg fuzzing to expose the fuzz entry points.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [features]
 default = ["zstd"]
 brotli = ["dep:brotli"]
