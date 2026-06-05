@@ -195,3 +195,67 @@ fn adv_15_compression_level_threads_through_transpose() {
         assert_eq!(decoded_high[i], records[i]);
     }
 }
+
+/// Regression (found in review): seek_numeric must not shift a
+/// boundary-coincident chunk to its boundary+24 alias address — that made
+/// numeric containment and record_index off by 24.
+#[test]
+#[cfg(feature = "zstd")]
+fn seek_numeric_into_boundary_coincident_chunk() {
+    // First chunk: 131,008 empty zstd records -> chunk_end = round_up(64 + 131008)
+    // = 131072 exactly (delta = 0). Second chunk: 30 distinct records in ONE
+    // chunk, boundary-coincident at canonical address 131072.
+    let n = 131_008usize;
+    let boundary: u64 = 131_072;
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    {
+        let mut w = RecordWriter::new(
+            &mut buf,
+            WriterOptions::new().compression(CompressionType::Zstd),
+        )
+        .expect("new ok");
+        for _ in 0..n {
+            w.write_record(b"").expect("write ok");
+        }
+        w.flush().expect("flush ok");
+        for i in 0..30u32 {
+            w.write_record(format!("r{i}").as_bytes()).expect("write ok");
+        }
+        w.flush().expect("flush ok");
+    }
+    let data = buf.into_inner();
+
+    // Sanity: read everything; find the second chunk's canonical address.
+    let mut reader =
+        RecordReader::new(Cursor::new(data.clone()), ReaderOptions::new()).expect("new ok");
+    let mut after_begin = None;
+    let mut after_count = 0;
+    while let Some(rec) = reader.read_record().expect("read ok") {
+        if !rec.is_empty() {
+            after_count += 1;
+            after_begin.get_or_insert(reader.last_pos().chunk_begin);
+        }
+    }
+    assert_eq!(after_count, 30);
+    assert_eq!(
+        after_begin.unwrap(),
+        boundary,
+        "second chunk should be boundary-coincident at the canonical address"
+    );
+
+    // seek_numeric to record 5 of the boundary-coincident chunk:
+    // numeric = canonical chunk_begin + record_index = 131072 + 5.
+    let mut reader =
+        RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("new ok");
+    reader.seek_numeric(boundary + 5).expect("seek_numeric ok");
+    let rec = reader
+        .read_record()
+        .expect("read after seek_numeric ok")
+        .expect("record expected");
+    assert_eq!(
+        rec,
+        b"r5",
+        "seek_numeric(boundary+5) must land on record 5 of the boundary-coincident chunk"
+    );
+}
+
