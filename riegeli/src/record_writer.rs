@@ -414,9 +414,11 @@ impl<W: Write> RecordWriter<W> {
         // but block headers are interleaved. We target a file_pos that is a multiple of
         // alignment, where the padding chunk fills the gap.
         //
-        // Strategy: compute the minimum data_size such that after writing the padding chunk
-        // the file_pos lands on a multiple of alignment. If already aligned, write a
-        // zero-data chunk to pad to the next boundary.
+        // Strategy: compute the minimum data_size such that after writing the
+        // padding chunk the file_pos lands on a multiple of alignment. If
+        // already aligned, no chunk is written at all (early return below) —
+        // repeated padding calls on a settled file are free, which is what
+        // makes flush-then-close add no redundant chunks.
 
         let current = self.file_pos;
 
