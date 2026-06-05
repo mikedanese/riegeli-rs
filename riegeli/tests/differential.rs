@@ -252,16 +252,12 @@ fn a4_truncated_final_chunk_read_time_vs_close_time() {
 // Cases B/C/D — projection parity
 // ---------------------------------------------------------------------------
 
-/// KNOWN-DIVERGENT: existence-only GROUP upgraded by an included child.
-/// Reference behavior (traced by the maintainer in review): C++ copies the
-/// group frame tags unconditionally and the included child resolves through
-/// its own lookup — output is group-start + child + group-end. Both Rust
-/// engines currently emit the EMPTY group (the bespoke existence-only
-/// skip machinery hard-codes the empty interior). The planned restructure
-/// (normal frames + child-level exclusion) flips this case to MATCH; until
-/// then both shapes are asserted so drift in either direction fails.
+/// MATCH (flipped from KNOWN-DIVERGENT by the group-ancestry restructure):
+/// existence-only GROUP upgraded by an included child. C++ emits
+/// group-start + child + group-end (maintainer-traced); Rust now agrees —
+/// the case was born divergent and proves the restructure.
 #[test]
-fn b_eo_group_upgraded_by_included_child_known_divergent() {
+fn b_eo_group_upgraded_by_included_child_matches() {
     let mut content = encode_varint_field(2, 7);
     content.extend_from_slice(&encode_varint_field(3, 9)); // excluded sibling
     let record = encode_group(1, &content);
@@ -272,27 +268,15 @@ fn b_eo_group_upgraded_by_included_child_known_divergent() {
             .compression(CompressionType::None),
     );
 
-    // Rust: empty group.
     let proj = FieldProjection::new()
         .add_field(Field::new(vec![1]).existence_only())
         .add_field(Field::new(vec![1, 2]));
     let rust_out = rust_read_projected(&data, proj);
-    let empty_group = encode_group(1, &[]);
-    assert_eq!(
-        rust_out,
-        vec![empty_group],
-        "rust still emits the empty group (flip this case to MATCH when the \
-         normal-frames restructure lands)"
-    );
-
-    // C++: group framing with the included child's real content.
     let cpp_out = cpp_read_projected(&data, &[vec![1, 0], vec![1, 2]]);
-    let expected_cpp = encode_group(1, &encode_varint_field(2, 7));
-    assert_eq!(
-        cpp_out,
-        vec![expected_cpp],
-        "C++ emits group-start + child + group-end per the reference trace"
-    );
+
+    let expected = encode_group(1, &encode_varint_field(2, 7));
+    assert_eq!(rust_out, cpp_out, "both sides agree");
+    assert_eq!(rust_out, vec![expected], "group frames the included child");
 }
 
 /// MATCH: include-child path with no matching data in the record — both
@@ -592,4 +576,189 @@ fn g_generated_corruption_regions_match() {
             assert_eq!(r.end(), c.end, "{ctx}: region {i} end");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Case I — randomized projection parity (groups in ANCESTRY positions)
+// ---------------------------------------------------------------------------
+
+/// Build a random valid proto record with nested structure. Returns the
+/// encoded bytes. Depth-limited; wire types include groups and submessages
+/// in ANCESTRY positions (group-wrapping-submessage, submessage-wrapping-
+/// group, group-wrapping-group) — the exact blind spot where the ancestry
+/// bugs lived.
+/// Field numbers are PARTITIONED BY DEPTH (depth d uses 5d+1..=5d+5) so a
+/// number never appears in two nesting contexts. Rationale: the
+/// implementations DISAGREE on records where a field number is aliased
+/// between an included context and an excluded-group interior (see the
+/// pinned case below — C++ emits the aliased occurrence inside the
+/// excluded group, this implementation does not). Which behavior the
+/// format intends for that shape is an open maintainer question; until
+/// answered, the generator stays on the unambiguous shapes.
+fn gen_record(rng: &mut Rng, depth: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let n_fields = 1 + rng.below(4);
+    for _ in 0..n_fields {
+        let field = depth * 5 + 1 + rng.below(5) as u32;
+        match rng.below(if depth < 3 { 5 } else { 3 }) {
+            0 => out.extend_from_slice(&encode_varint_field(field, rng.below(1000))),
+            1 => {
+                let len = rng.below(6) as usize;
+                let val: Vec<u8> = (0..len).map(|i| (i as u8) + 65).collect();
+                out.extend_from_slice(&encode_string_field(field, &val));
+            }
+            2 => out.extend_from_slice(&encode_varint_field(field, 7)),
+            3 => {
+                let inner = gen_record(rng, depth + 1);
+                out.extend_from_slice(&encode_string_field(field, &inner));
+            }
+            _ => {
+                let inner = gen_record(rng, depth + 1);
+                out.extend_from_slice(&encode_group(field, &inner));
+            }
+        }
+    }
+    out
+}
+
+/// Build a random projection: 1-3 paths of depth 1-3, ~1/3 existence-only
+/// terminals. Returns (rust form, cpp flat form).
+fn gen_projection(rng: &mut Rng) -> (FieldProjection, Vec<Vec<u32>>) {
+    let mut proj = FieldProjection::new();
+    let mut cpp_paths = Vec::new();
+    let n_paths = 1 + rng.below(3);
+    for _ in 0..n_paths {
+        let depth = 1 + rng.below(3) as usize;
+        let path: Vec<u32> = (0..depth)
+            .map(|d| (d as u32) * 5 + 1 + rng.below(5) as u32)
+            .collect();
+        let eo = rng.below(3) == 0;
+        let mut field = Field::new(path.clone());
+        let mut cpp_path = path.clone();
+        if eo {
+            field = field.existence_only();
+            cpp_path.push(0); // kExistenceOnly
+        }
+        proj = proj.add_field(field);
+        cpp_paths.push(cpp_path);
+    }
+    (proj, cpp_paths)
+}
+
+/// MATCH: random records x random projections — Rust and C++ projected
+/// outputs must agree byte-for-byte. Failures print the seed for
+/// one-command reproduction. This case would have caught all three
+/// ancestry-blindness bugs (group-walk invisibility, start-node
+/// own-frame misresolution, buffer-pruning under full includes).
+#[test]
+fn i_randomized_projection_parity() {
+    const CASES: u64 = 100;
+    const BASE_SEED: u64 = 0x9E0_1EC7_0000_0001;
+
+    for case in 0..CASES {
+        let seed = BASE_SEED + case;
+        let mut rng = Rng(seed);
+        let record = gen_record(&mut rng, 0);
+        if record.is_empty() {
+            continue;
+        }
+        let (proj, cpp_paths) = gen_projection(&mut rng);
+
+        let data = rust_write(
+            &[record.as_slice()],
+            WriterOptions::new()
+                .transpose(true)
+                .compression(CompressionType::None),
+        );
+        let rust_out = rust_read_projected(&data, proj);
+        let cpp_out = cpp_read_projected(&data, &cpp_paths);
+        assert_eq!(
+            rust_out, cpp_out,
+            "seed={seed:#x} case={case} paths={cpp_paths:?} record={record:?}"
+        );
+    }
+}
+
+/// KNOWN-DIVERGENT (open maintainer question): a field number aliased
+/// between an INCLUDED top-level context and the interior of an EXCLUDED
+/// group. Observed (this minimal repro): C++ emits the occurrence inside
+/// the excluded group as well as the top-level one; this implementation
+/// emits only the top-level occurrence. Which output the format intends
+/// for aliased-field shapes is a question for the maintainer — neither
+/// behavior is asserted as correct here; BOTH are pinned so drift in
+/// either direction fails while the question is open. Mechanism
+/// (verified in the reference source): both engines resolve a shared
+/// tag node's inclusion DYNAMICALLY against the live ancestry, but the
+/// reference CACHES the first resolution on the node and reuses it for
+/// every later occurrence, while this implementation re-resolves per
+/// visit — so the reference's output depends on which occurrence
+/// decodes first (see the mirrored-order case below, where the cached
+/// exclusion DROPS the included occurrence).
+#[test]
+fn j_aliased_field_in_excluded_group_known_divergent() {
+    // record: f4-group{ f3: 7 }, f3: 9  — f3 aliased inside the excluded
+    // f4 group and at (included) top level. Projection: [3] full include.
+    let mut record = encode_group(4, &encode_varint_field(3, 7));
+    record.extend_from_slice(&encode_varint_field(3, 9));
+    let data = rust_write(
+        &[record.as_slice()],
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![3]));
+    let rust_out = rust_read_projected(&data, proj);
+    let cpp_out = cpp_read_projected(&data, &[vec![3]]);
+
+    let top_only = encode_varint_field(3, 9);
+    assert_eq!(
+        rust_out,
+        vec![top_only],
+        "this implementation emits only the top-level occurrence"
+    );
+    let mut with_aliased = encode_varint_field(3, 7);
+    with_aliased.extend_from_slice(&encode_varint_field(3, 9));
+    assert_eq!(
+        cpp_out,
+        vec![with_aliased],
+        "C++ emits the excluded-group interior occurrence as well"
+    );
+}
+
+/// KNOWN-DIVERGENT (same open question, mirrored order): identical
+/// structure to the case above with the wire order swapped — the
+/// top-level (included) occurrence comes FIRST in the record, so in
+/// backward decode the shared node's first resolution happens INSIDE the
+/// excluded group, and the reference caches the exclusion: the included
+/// top-level value is silently DROPPED. Together the two cases show the
+/// reference's aliased-field behavior is order-dependent between leaking
+/// excluded data and dropping included data; this implementation is
+/// context-correct in both orders. Both shapes pinned.
+#[test]
+fn j2_aliased_field_mirrored_order_known_divergent() {
+    // record: f3: 9, f4-group{ f3: 7 } — top-level occurrence FIRST.
+    let mut record = encode_varint_field(3, 9);
+    record.extend_from_slice(&encode_group(4, &encode_varint_field(3, 7)));
+    let data = rust_write(
+        &[record.as_slice()],
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![3]));
+    let rust_out = rust_read_projected(&data, proj);
+    let cpp_out = cpp_read_projected(&data, &[vec![3]]);
+
+    assert_eq!(
+        rust_out,
+        vec![encode_varint_field(3, 9)],
+        "this implementation keeps the included top-level occurrence"
+    );
+    assert_eq!(
+        cpp_out,
+        vec![Vec::<u8>::new()],
+        "the reference's cached exclusion drops the included occurrence"
+    );
 }

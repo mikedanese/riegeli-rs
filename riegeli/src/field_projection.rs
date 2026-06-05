@@ -129,6 +129,17 @@ impl FieldProjection {
     /// the buffers behind paths of length >= 2 and their values silently
     /// decode as zeros. Matching at any depth is conservative — it may keep
     /// a buffer that projection later drops, but it can never starve one.
+    /// True when any path's terminal include is a full include (not
+    /// existence-only): the subtree under that terminus is included
+    /// wholesale, so fields inside it carry no mention of their own and
+    /// static buffer pruning cannot safely drop ANY buffer.
+    pub(crate) fn has_full_include(&self) -> bool {
+        match &self.fields {
+            None => true,
+            Some(fields) => fields.iter().any(|f| !f.existence_only),
+        }
+    }
+
     pub(crate) fn mentions_field(&self, field_number: u32) -> bool {
         match &self.fields {
             None => true,
@@ -224,20 +235,39 @@ fn apply_projection_inner(record: &[u8], projection: &FieldProjection) -> Vec<u8
         };
         pos += consumed;
 
-        // Check if this field should be included.
-        let include = projection.includes_top_level_field(field_number);
-        let existence_only = include
-            && projection
-                .field_for(field_number)
-                .map(|f| f.existence_only)
-                .unwrap_or(false);
-
-        // Determine if this is a submessage that may need recursive projection.
-        let needs_sub_projection =
-            include && !existence_only && wire_type == WireType::LengthDelimited && {
-                let sub = projection.sub_projection(field_number);
-                !sub.is_all() || projection.is_leaf_field(field_number)
-            };
+        // Effective include type via the C++ min-resolution (IncludeFully <
+        // IncludeChild < ExistenceOnly): an included child at ANY depth
+        // upgrades an existence-only terminus, and a full include wins over
+        // both. This matches the transpose engine's include map and the C++
+        // reference (std::min over conflicting entries).
+        let mut has_fully = false;
+        let mut has_child = false;
+        let mut has_eo = false;
+        if let Some(fields) = projection.fields() {
+            for f in fields {
+                match f.path.first() {
+                    None => has_fully = true, // empty path: include everything
+                    Some(&first) if first == field_number => {
+                        if f.path.len() > 1 {
+                            has_child = true;
+                        } else if f.existence_only {
+                            has_eo = true;
+                        } else {
+                            has_fully = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            has_fully = true;
+        }
+        let include = has_fully || has_child || has_eo;
+        let existence_only = include && !has_fully && !has_child;
+        let needs_sub_projection = include
+            && !existence_only
+            && !has_fully
+            && matches!(wire_type, WireType::LengthDelimited | WireType::StartGroup);
 
         // Read the field value bytes.
         let (value_bytes, field_end) = match read_field_value(record, pos, wire_type) {
@@ -273,20 +303,27 @@ fn apply_projection_inner(record: &[u8], projection: &FieldProjection) -> Vec<u8
                 }
             }
         } else if needs_sub_projection && wire_type == WireType::LengthDelimited {
-            // Recurse into the submessage with sub-projection.
+            // IncludeChild: recurse into the submessage with sub-projection.
             let sub = projection.sub_projection(field_number);
-            let is_leaf = projection.is_leaf_field(field_number);
-            let filtered_content = if !sub.is_all() && !is_leaf {
-                // Only deeper fields are projected — recurse.
-                apply_projection_inner(value_bytes, &sub)
-            } else {
-                // This is a leaf (exact match) — include the whole submessage.
-                value_bytes.to_vec()
-            };
+            let filtered_content = apply_projection_inner(value_bytes, &sub);
             let len_varint = encode_u32(filtered_content.len() as u32);
             out.extend_from_slice(&tag_bytes);
             out.extend_from_slice(&len_varint);
             out.extend_from_slice(&filtered_content);
+        } else if needs_sub_projection && wire_type == WireType::StartGroup {
+            // IncludeChild GROUP: project the interior like a submessage
+            // (value_bytes includes the trailing end tag — split it off,
+            // recurse the interior, re-append). Copying wholesale here let
+            // excluded siblings inside the group leak through.
+            let end_tag = encode_u32((field_number << 3) | (WireType::EndGroup as u32));
+            let interior = value_bytes
+                .strip_suffix(end_tag.as_slice())
+                .unwrap_or(value_bytes);
+            let sub = projection.sub_projection(field_number);
+            let filtered = apply_projection_inner(interior, &sub);
+            out.extend_from_slice(&tag_bytes);
+            out.extend_from_slice(&filtered);
+            out.extend_from_slice(&end_tag);
         } else {
             // Include tag + value unchanged.
             out.extend_from_slice(&tag_bytes);
@@ -423,6 +460,77 @@ fn find_group_end(data: &[u8], pos: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    fn fp_group(field: u32, content: &[u8]) -> Vec<u8> {
+        let mut out = crate::varint::encode_u32((field << 3) | 3);
+        out.extend_from_slice(content);
+        out.extend_from_slice(&crate::varint::encode_u32((field << 3) | 4));
+        out
+    }
+
+    fn fp_varint(field: u32, value: u64) -> Vec<u8> {
+        let mut out = crate::varint::encode_u32((field << 3) | 0);
+        let mut v = value;
+        loop {
+            let b = (v & 0x7F) as u8;
+            v >>= 7;
+            if v == 0 { out.push(b); break; }
+            out.push(b | 0x80);
+        }
+        out
+    }
+
+    fn fp_string(field: u32, value: &[u8]) -> Vec<u8> {
+        let mut out = crate::varint::encode_u32((field << 3) | 2);
+        out.extend_from_slice(&crate::varint::encode_u32(value.len() as u32));
+        out.extend_from_slice(value);
+        out
+    }
+
+    /// Probes A/B/C + the upgrade shape in the APPLY engine — recursive
+    /// descent has natural ancestry, but assert it rather than assume it
+    /// (the transpose engine's version of these shapes silently lost data).
+    #[test]
+    fn apply_group_and_full_include_shapes() {
+        let mut content = fp_varint(2, 7);
+        content.extend_from_slice(&fp_varint(3, 9));
+
+        // [1,2] through a group: excluded sibling must not leak.
+        let record = fp_group(1, &content);
+        let proj = FieldProjection::new().add_field(Field::new(vec![1, 2]));
+        assert_eq!(proj.apply(&record), fp_group(1, &fp_varint(2, 7)));
+
+        // [1] full include of a group: interior intact.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+        assert_eq!(proj.apply(&record), record);
+
+        // [1] full include of an LD submessage: values intact.
+        let record_ld = fp_string(1, &content);
+        assert_eq!(proj.apply(&record_ld), record_ld);
+
+        // [1]=EO + [1,2]: min-resolution upgrade — child's real content.
+        let proj = FieldProjection::new()
+            .add_field(Field::new(vec![1]).existence_only())
+            .add_field(Field::new(vec![1, 2]));
+        assert_eq!(proj.apply(&record), fp_group(1, &fp_varint(2, 7)));
+        assert_eq!(proj.apply(&record_ld), fp_string(1, &fp_varint(2, 7)));
+    }
+
+    /// Stray EndGroup: the record fails proto validation (unmatched end
+    /// tag), and apply's contract for non-proto records is UNCHANGED
+    /// pass-through — projection only filters records that parse as valid
+    /// proto. Pin that contract: no filtering, no corruption, no panic.
+    #[test]
+    fn apply_stray_end_group_passes_through_invalid_proto() {
+        let mut record = fp_varint(2, 7);
+        record.extend_from_slice(&crate::varint::encode_u32((1 << 3) | 4));
+        let proj = FieldProjection::new().add_field(Field::new(vec![2]));
+        assert_eq!(
+            proj.apply(&record),
+            record,
+            "invalid proto (stray end tag) passes through unfiltered"
+        );
+    }
+
     use super::*;
     use crate::proto::make_tag;
 

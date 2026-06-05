@@ -195,6 +195,14 @@ fn write_records(records: &[&[u8]], opts: WriterOptions) -> Vec<u8> {
 }
 
 /// Read all records from bytes with given options.
+
+fn encode_group(field: u32, content: &[u8]) -> Vec<u8> {
+    let mut out = encode_u32((field << 3) | 3);
+    out.extend_from_slice(content);
+    out.extend_from_slice(&encode_u32((field << 3) | 4));
+    out
+}
+
 fn read_all(data: &[u8], opts: ReaderOptions) -> Vec<Vec<u8>> {
     let cursor = Cursor::new(data);
     let mut reader = RecordReader::new(cursor, opts).expect("reader new ok");
@@ -657,3 +665,85 @@ fn existence_only_upgraded_by_included_child_matches_cpp() {
         "included child must win over existence-only (C++ min-resolution)"
     );
 }
+
+/// PROBE A: nested include path THROUGH a group ([1,2] where 1 is a group).
+#[test]
+fn probe_nested_path_through_group() {
+    let mut content = encode_varint_field(2, 7);
+    content.extend_from_slice(&encode_varint_field(3, 9));
+    let record = encode_group(1, &content);
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new().transpose(true).compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new().add_field(Field::new(vec![1, 2]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    let expected = encode_group(1, &encode_varint_field(2, 7));
+    assert_eq!(got[0], expected, "PROBE A: child through group");
+}
+
+/// PROBE B: group included FULLY by path [1] — interior must survive.
+#[test]
+fn probe_group_included_fully() {
+    let mut content = encode_varint_field(2, 7);
+    content.extend_from_slice(&encode_varint_field(3, 9));
+    let record = encode_group(1, &content);
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new().transpose(true).compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got[0], record, "PROBE B: fully-included group keeps interior");
+}
+
+/// PROBE C: LD submessage included FULLY by path [1] — interior values must
+/// survive (the length-delimited analogue of probe B).
+#[test]
+fn probe_ld_submessage_included_fully() {
+    let mut content = encode_varint_field(2, 7);
+    content.extend_from_slice(&encode_varint_field(3, 9));
+    let record = encode_string_field(1, &content);
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new().transpose(true).compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got[0], record, "PROBE C: fully-included LD submessage keeps interior values");
+}
+
+/// Buffer-consumption interleave (named documentation of the property the
+/// randomized differential case covers statistically): an existence-only
+/// submessage whose interior spans multiple buffer kinds (varint + string +
+/// fixed32), followed by an included sibling whose exact values must
+/// survive — the skip path must consume interior buffer bytes in exactly
+/// the order the include path would have.
+#[test]
+fn eo_interior_buffer_interleave_preserves_sibling_values() {
+    let mut inner = encode_varint_field(1, 300);
+    inner.extend_from_slice(&encode_string_field(2, b"HELLO"));
+    inner.extend_from_slice(&encode_u32((3 << 3) | 5)); // fixed32 tag
+    inner.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+    let mut record = encode_string_field(1, &inner); // EO target
+    record.extend_from_slice(&encode_string_field(2, b"SIBLING"));
+    record.extend_from_slice(&encode_varint_field(3, 777));
+
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new().transpose(true).compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new()
+        .add_field(Field::new(vec![1]).existence_only())
+        .add_field(Field::new(vec![2]))
+        .add_field(Field::new(vec![3]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+
+    let mut expected = encode_u32((1 << 3) | 2);
+    expected.push(0x00);
+    expected.extend_from_slice(&encode_string_field(2, b"SIBLING"));
+    expected.extend_from_slice(&encode_varint_field(3, 777));
+    assert_eq!(got[0], expected, "sibling values exact after EO interior skip");
+}
+
+

@@ -90,7 +90,16 @@ enum CallbackType {
     /// SkippedSubmessageEnd) but a frame is pushed so the matching start
     /// writes the submessage tag with length zero — existence-only means
     /// tag + empty content, not silent omission.
-    ExistenceOnlySubmessageEnd,
+    /// Group end under enabled projection: push an ancestry frame AND copy
+    /// the end tag. Frames are how the dynamic inclusion walk sees group
+    /// ancestry — without them, children inside a projected group resolve
+    /// against the wrong parent chain and are silently dropped. (C++ does
+    /// not need this: it resolves inclusion statically at node-build time.)
+    EndProjectionGroup,
+    /// Group start under enabled projection: pop the ancestry frame and
+    /// copy the start tag (no length header — groups are delimited by
+    /// their tags).
+    StartProjectionGroup,
     /// A submessage-start node for an excluded submessage: decrements
     /// `skipped_submessage_level` instead of popping and writing a header.
     SkippedSubmessageStart,
@@ -741,6 +750,18 @@ impl TransposeChunkDecoder {
     ) -> Vec<bool> {
         if num_buffers == 0 {
             return Vec::new();
+        }
+        // The scan below is a FLAT walk of the tag table — it has no
+        // ancestry context, so it cannot tell which fields sit inside a
+        // fully-included subtree. Fields under an IncludeFully terminus
+        // are included without any mention of their own, and pruning
+        // their buffers silently zeroes their values. With any full
+        // include present, every buffer must be kept (pruning is an
+        // optimization; it only applies when the projection is built
+        // purely from existence-only terminals, whose interiors are
+        // excluded per-child).
+        if projection.has_full_include() {
+            return vec![true; num_buffers];
         }
         let mut needed = vec![false; num_buffers];
         let mut subtype_idx: usize = 0;
@@ -1411,7 +1432,17 @@ fn resolve_select_callback(
         field_included = FieldIncluded::ExistenceOnly;
         let mut current_parent_id = INVALID_POS;
 
-        for frame in submessage_stack.iter() {
+        // A group's START node resolves while its OWN ancestry frame (pushed
+        // by the matching end in backward decode order) is still on the
+        // stack — strict proto nesting makes the top frame provably the
+        // group itself, so exclude it or the group resolves as its own
+        // parent and misclassifies.
+        let walk_frames = if tag_wire_type(tmpl.tag) == Some(WireType::StartGroup) {
+            &submessage_stack[..submessage_stack.len().saturating_sub(1)]
+        } else {
+            &submessage_stack[..]
+        };
+        for frame in walk_frames.iter() {
             let frame_node = &nodes[frame.node_index];
             // The frame node is a SubmessageEnd node whose tag_data contains
             // the tag bytes for the enclosing length-delimited field.
@@ -1471,8 +1502,14 @@ fn callback_for_field_included(
     let wt = tag_wire_type(tag);
     match field_included {
         FieldIncluded::Yes => {
-            // Normal included field — dispatch to the standard callback.
-            TransposeChunkDecoder::callback_for_wire_type(wt, st)
+            // Groups must push/pop ancestry frames under projection so the
+            // inclusion walk can see them (see EndProjectionGroup).
+            match wt {
+                Some(WireType::EndGroup) => Ok(CallbackType::EndProjectionGroup),
+                Some(WireType::StartGroup) => Ok(CallbackType::StartProjectionGroup),
+                // Normal included field — dispatch to the standard callback.
+                _ => TransposeChunkDecoder::callback_for_wire_type(wt, st),
+            }
         }
         FieldIncluded::No => {
             // Excluded field — produce no output.
@@ -1497,19 +1534,21 @@ fn callback_for_field_included(
             }
         }
         FieldIncluded::ExistenceOnly => {
-            // Existence-only: emit tag + zero value, skip data buffer.
-            // For submessage end nodes, produce a SkippedSubmessageEnd since
-            // existence-only on a submessage means "include the tag but not
-            // the contents" — the submessage is effectively skipped.
+            // Existence-only: the C++ normal-frames model. Submessage ends
+            // get ORDINARY frames — the interior children individually
+            // resolve excluded (no include-map entries under the
+            // existence-only terminus), so the frame closes over zero
+            // bytes and the start writes tag + empty length. Groups frame
+            // like every projected group. Scalars/strings emit tag + zero
+            // value as before.
             match wt {
                 Some(WireType::LengthDelimited)
                     if st == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE =>
                 {
-                    // Emit tag + zero length for the submessage itself while
-                    // skipping its contents — the simple-chunk path emits
-                    // tag + 0x00 and the docs promise the same here.
-                    Ok(CallbackType::ExistenceOnlySubmessageEnd)
+                    Ok(CallbackType::SubmessageEnd)
                 }
+                Some(WireType::EndGroup) => Ok(CallbackType::EndProjectionGroup),
+                Some(WireType::StartGroup) => Ok(CallbackType::StartProjectionGroup),
                 _ => Ok(CallbackType::ExistenceOnly),
             }
         }
@@ -1521,10 +1560,6 @@ struct DecodeState<'a> {
     dest: &'a mut BackwardBuffer,
     buffers: &'a mut [BufferCursor],
     submessage_stack: &'a mut Vec<SubmessageFrame>,
-    /// Skip levels at which an existence-only submessage frame was pushed:
-    /// the matching start at that level writes the zero-length header
-    /// instead of silently un-skipping.
-    existence_only_levels: &'a mut Vec<i32>,
     limits: &'a mut Vec<usize>,
     num_records: u64,
     nonproto_lengths_index: Option<usize>,
@@ -1607,11 +1642,6 @@ fn execute_node_action(
                     state.skipped_submessage_level
                 ).into()));
             }
-            if !state.existence_only_levels.is_empty() {
-                return Err(RiegeliError::MalformedData(
-                    "unmatched existence-only submessage at record boundary".into(),
-                ));
-            }
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
             }
@@ -1658,13 +1688,40 @@ fn execute_node_action(
         CallbackType::SkippedSubmessageEnd => {
             state.skipped_submessage_level += 1;
         }
-        CallbackType::ExistenceOnlySubmessageEnd => {
+        CallbackType::EndProjectionGroup => {
+            // Ancestry frame for the inclusion walk + the end tag bytes.
             state.submessage_stack.push(SubmessageFrame {
                 end_pos: state.dest.pos(),
                 node_index: current_node_idx,
             });
-            state.skipped_submessage_level += 1;
-            state.existence_only_levels.push(state.skipped_submessage_level);
+            state.dest.write(&node.tag_data[..node.tag_data_size])?;
+        }
+        CallbackType::StartProjectionGroup => {
+            // The popped frame must be a group frame: a crafted state
+            // machine interleaving a submessage end between a group's end
+            // and start would otherwise pop the WRONG frame here (and the
+            // walk's own-frame exclusion would hide the wrong ancestor).
+            match state.submessage_stack.pop() {
+                None => {
+                    return Err(RiegeliError::MalformedData(
+                        "group frame stack underflow".into(),
+                    ));
+                }
+                Some(frame) => {
+                    let frame_node = &nodes[frame.node_index];
+                    let frame_is_group = !frame_node.tag_data.is_empty()
+                        && decode_u32(&frame_node.tag_data)
+                            .ok()
+                            .and_then(|(t, _)| tag_wire_type(t))
+                            == Some(WireType::EndGroup);
+                    if !frame_is_group {
+                        return Err(RiegeliError::MalformedData(
+                            "group start paired with a non-group frame".into(),
+                        ));
+                    }
+                }
+            }
+            state.dest.write(&node.tag_data[..node.tag_data_size])?;
         }
         // Projection-aware: excluded submessage start — decrement skip level,
         // no stack pop, no output bytes.
@@ -1673,13 +1730,6 @@ fn execute_node_action(
                 return Err(RiegeliError::MalformedData(
                     "skipped submessage stack underflow".into(),
                 ));
-            }
-            // If this start matches an existence-only end, write the
-            // submessage tag with its (empty — the interior was skipped)
-            // length instead of silently un-skipping.
-            if state.existence_only_levels.last() == Some(&state.skipped_submessage_level) {
-                state.existence_only_levels.pop();
-                write_submessage_header(state.dest, nodes, state.submessage_stack)?;
             }
             state.skipped_submessage_level -= 1;
         }
@@ -1999,7 +2049,6 @@ fn run_state_machine(
     // per record is pushed by the bounded transition loop below).
     let mut limits: Vec<usize> = Vec::with_capacity((num_records as usize).min(1 << 16));
     let mut submessage_stack: Vec<SubmessageFrame> = Vec::new();
-    let mut existence_only_levels: Vec<i32> = Vec::new();
     let mut current_node_idx = first_node;
     let mut num_iters: i32 = if nodes[current_node_idx].is_implicit {
         1
@@ -2012,7 +2061,6 @@ fn run_state_machine(
             dest: &mut dest,
             buffers,
             submessage_stack: &mut submessage_stack,
-            existence_only_levels: &mut existence_only_levels,
             limits: &mut limits,
             num_records,
             nonproto_lengths_index,
