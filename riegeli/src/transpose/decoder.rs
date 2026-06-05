@@ -258,6 +258,14 @@ impl BufferCursor {
         }
     }
 
+    /// Bytes left between the read position and the end of the buffer.
+    /// For a pruned cursor this is 0 — reads still succeed (yielding
+    /// zeros), so a caller using this as a capacity hint only loses the
+    /// reservation, never correctness.
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
     /// Create a pruned (zero-data) cursor.
     fn pruned() -> Self {
         Self {
@@ -603,7 +611,11 @@ impl TransposeChunkDecoder {
             .map_err(|e| RiegeliError::MalformedData(format!("reading header_length: {e}").into()))?;
         pos += consumed;
 
-        let header_end = pos + header_length as usize;
+        // checked_add: header_length is attacker-claimed; a wrapping add
+        // would let the bounds check pass and the slice below panic.
+        let header_end = pos.checked_add(header_length as usize).ok_or_else(|| {
+            RiegeliError::MalformedData("transpose header length overflows".into())
+        })?;
         if header_end > data.len() {
             return Err(RiegeliError::MalformedData(
                 "transpose header extends past chunk data".into(),
@@ -620,11 +632,16 @@ impl TransposeChunkDecoder {
         let num_buckets = hdr.read_varint32()? as usize;
         let num_buffers = hdr.read_varint32()? as usize;
 
-        let mut bucket_compressed_sizes = Vec::with_capacity(num_buckets);
+        // num_buckets/num_buffers are attacker-claimed counts from the chunk
+        // header blob; the read loops fail fast on underflow, but a
+        // reservation from the raw claim (up to u32::MAX elements) would
+        // fire first. Each element costs at least one varint byte, so the
+        // cursor's remaining length bounds the real count.
+        let mut bucket_compressed_sizes = Vec::with_capacity(num_buckets.min(hdr.remaining()));
         for _ in 0..num_buckets {
             bucket_compressed_sizes.push(hdr.read_varint64()? as usize);
         }
-        let mut buffer_uncompressed_sizes = Vec::with_capacity(num_buffers);
+        let mut buffer_uncompressed_sizes = Vec::with_capacity(num_buffers.min(hdr.remaining()));
         for _ in 0..num_buffers {
             buffer_uncompressed_sizes.push(hdr.read_varint64()? as usize);
         }
@@ -946,11 +963,13 @@ impl TransposeChunkDecoder {
     fn parse_state_metadata(hdr: &mut BufferCursor) -> Result<StateMetadata, RiegeliError> {
         let num_states = hdr.read_varint32()? as usize;
 
-        let mut tags = Vec::with_capacity(num_states);
+        // Claimed count — cap the reservations by the bytes actually
+        // available (one varint byte minimum per element), as above.
+        let mut tags = Vec::with_capacity(num_states.min(hdr.remaining()));
         for _ in 0..num_states {
             tags.push(hdr.read_varint32()?);
         }
-        let mut next_node_indices = Vec::with_capacity(num_states);
+        let mut next_node_indices = Vec::with_capacity(num_states.min(hdr.remaining()));
         for _ in 0..num_states {
             next_node_indices.push(hdr.read_varint32()?);
         }
@@ -2067,6 +2086,61 @@ fn contains_implicit_loop(nodes: &[StateMachineNode], _num_states: usize) -> boo
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A header blob claiming ~u32::MAX buckets and buffers must fail fast
+    /// on underflow without first reserving tens of gigabytes for the
+    /// claimed counts (the reservation used to precede the bounded loops).
+    #[test]
+    fn hostile_bucket_and_buffer_counts_do_not_preallocate() {
+        // chunk data: [compression=None][varint header_len=10][header blob]
+        // header blob: varint32(u32::MAX) twice (num_buckets, num_buffers).
+        let huge_varint: [u8; 5] = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        let mut data = vec![0u8]; // CompressionType::None
+        data.push(10u8); // varint header_length = 10
+        data.extend_from_slice(&huge_varint);
+        data.extend_from_slice(&huge_varint);
+
+        let header = crate::chunk_header::ChunkHeader::from_parts(
+            &data,
+            crate::chunk_header::ChunkType::Transposed,
+            1,
+            0,
+        );
+        let chunk = crate::simple_chunk::Chunk { header, data };
+        let err = TransposeChunkDecoder::new_with_projection(chunk, None)
+            .err()
+            .expect("hostile counts must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("underflow") || msg.contains("varint") || msg.contains("truncated"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// A claimed header length that overflows usize must be rejected by the
+    /// checked add, not wrap past the bounds check into a panicking slice.
+    #[test]
+    fn hostile_header_length_overflow_is_rejected() {
+        let mut data = vec![0u8]; // CompressionType::None
+        // varint64(u64::MAX)
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+        let header = crate::chunk_header::ChunkHeader::from_parts(
+            &data,
+            crate::chunk_header::ChunkType::Transposed,
+            1,
+            0,
+        );
+        let chunk = crate::simple_chunk::Chunk { header, data };
+        let err = TransposeChunkDecoder::new_with_projection(chunk, None)
+            .err()
+            .expect("overflowing header length must error");
+        assert!(
+            err.to_string().contains("overflows") || err.to_string().contains("extends past"),
+            "unexpected error: {err}"
+        );
+    }
+
     use super::*;
     use crate::chunk_header::{ChunkHeader, ChunkType};
     use crate::field_projection::Field;

@@ -321,7 +321,12 @@ fn decode_uncompressed(
     let sizes_byte_len = sizes_byte_len as usize;
 
     let sizes_start = varint_consumed;
-    if sizes_start + sizes_byte_len > payload.len() {
+    // checked_add: sizes_byte_len is attacker-claimed; a wrapping add here
+    // would let the truncation check pass and the slice below panic.
+    let sizes_end = sizes_start.checked_add(sizes_byte_len).ok_or_else(|| {
+        RiegeliError::MalformedData("sizes section length overflows".into())
+    })?;
+    if sizes_end > payload.len() {
         return Err(RiegeliError::MalformedData(format!(
             "sizes section truncated: need {sizes_byte_len} bytes starting at offset {sizes_start}, \
              but payload is only {} bytes",
@@ -329,12 +334,16 @@ fn decode_uncompressed(
         ).into()));
     }
 
-    let sizes_data = &payload[sizes_start..sizes_start + sizes_byte_len];
-    let values_start = sizes_start + sizes_byte_len;
+    let sizes_data = &payload[sizes_start..sizes_end];
+    let values_start = sizes_end;
 
     // Parse individual record sizes from the sizes section.
     let mut pos = 0usize;
-    let mut sizes: Vec<usize> = Vec::with_capacity(num_records);
+    // Cap the reservation by the sizes-section length: num_records is an
+    // attacker-claimed count, but each size costs at least one varint byte,
+    // so a count beyond the section length cannot materialize (the loop
+    // errors) and must not be pre-allocated for.
+    let mut sizes: Vec<usize> = Vec::with_capacity(num_records.min(sizes_data.len()));
     for i in 0..num_records {
         if pos >= sizes_data.len() {
             return Err(RiegeliError::MalformedData(format!(
@@ -348,15 +357,21 @@ fn decode_uncompressed(
         sizes.push(size as usize);
     }
 
-    let total_values_len: usize = sizes.iter().sum();
-    if values_start + total_values_len > payload.len() {
+    let total_values_len: usize = sizes
+        .iter()
+        .try_fold(0usize, |acc, &sz| acc.checked_add(sz))
+        .ok_or_else(|| RiegeliError::MalformedData("record sizes sum overflows".into()))?;
+    let values_end = values_start.checked_add(total_values_len).ok_or_else(|| {
+        RiegeliError::MalformedData("values section end overflows".into())
+    })?;
+    if values_end > payload.len() {
         return Err(RiegeliError::MalformedData(format!(
             "values section truncated: need {total_values_len} bytes but only {} available",
             payload.len() - values_start
         ).into()));
     }
 
-    let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_records);
+    let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
     let mut offset = 0usize;
     for size in &sizes {
         record_ranges.push((offset, *size));
@@ -398,7 +413,12 @@ fn decode_compressed(
     pos += consumed;
     let sizes_blob_len = sizes_blob_len as usize;
 
-    if pos + sizes_blob_len > payload.len() {
+    // checked_add: sizes_blob_len is attacker-claimed; a wrapping add here
+    // would let the truncation check pass and the slice below panic.
+    let sizes_blob_end = pos.checked_add(sizes_blob_len).ok_or_else(|| {
+        RiegeliError::MalformedData("sizes blob length overflows".into())
+    })?;
+    if sizes_blob_end > payload.len() {
         return Err(RiegeliError::MalformedData(format!(
             "sizes blob truncated: need {sizes_blob_len} bytes at offset {pos}, \
              payload is {} bytes",
@@ -406,8 +426,8 @@ fn decode_compressed(
         ).into()));
     }
 
-    let sizes_blob = &payload[pos..pos + sizes_blob_len];
-    pos += sizes_blob_len;
+    let sizes_blob = &payload[pos..sizes_blob_end];
+    pos = sizes_blob_end;
 
     // Parse sizes blob: varint64(uncompressed_sizes_len), compressed sizes data
     let (uncompressed_sizes_len, consumed2) = decode_u64(sizes_blob).map_err(|e| {
@@ -437,7 +457,9 @@ fn decode_compressed(
 
     // Parse sizes section
     let mut spos = 0usize;
-    let mut sizes: Vec<usize> = Vec::with_capacity(num_records);
+    // Same claimed-count cap as the uncompressed path: one varint byte
+    // minimum per size bounds the real element count.
+    let mut sizes: Vec<usize> = Vec::with_capacity(num_records.min(sizes_bytes.len()));
     for i in 0..num_records {
         if spos >= sizes_bytes.len() {
             return Err(RiegeliError::MalformedData(format!(
@@ -452,7 +474,10 @@ fn decode_compressed(
     }
 
     // Verify total values length
-    let total_values_len: usize = sizes.iter().sum();
+    let total_values_len: usize = sizes
+        .iter()
+        .try_fold(0usize, |acc, &sz| acc.checked_add(sz))
+        .ok_or_else(|| RiegeliError::MalformedData("record sizes sum overflows".into()))?;
     if total_values_len != values_bytes.len() {
         return Err(RiegeliError::MalformedData(format!(
             "values length mismatch: sizes sum {total_values_len} != decompressed values {}",
@@ -460,7 +485,7 @@ fn decode_compressed(
         ).into()));
     }
 
-    let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_records);
+    let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
     let mut offset = 0usize;
     for size in &sizes {
         record_ranges.push((offset, *size));
@@ -476,6 +501,38 @@ fn decode_compressed(
 
 #[cfg(test)]
 mod tests {
+    /// The compressed path has the same checked add on its claimed sizes
+    /// blob length as the uncompressed path.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn hostile_sizes_blob_len_overflow_is_rejected_compressed() {
+        // varint64(u64::MAX) as sizes_blob_len, then nothing.
+        let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let err = super::decode_compressed(&payload, 1, CompressionType::Zstd)
+            .err()
+            .expect("overflowing sizes blob length must error");
+        assert!(
+            err.to_string().contains("overflows") || err.to_string().contains("truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A claimed sizes-section length near u64::MAX must be rejected by the
+    /// checked add — a wrapping add would let the truncation check pass and
+    /// the section slice panic.
+    #[test]
+    fn hostile_sizes_byte_len_overflow_is_rejected() {
+        // varint64(u64::MAX), then nothing.
+        let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let err = super::decode_uncompressed(&payload, 1)
+            .err()
+            .expect("overflowing sizes length must error");
+        assert!(
+            err.to_string().contains("overflows") || err.to_string().contains("truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
     use super::*;
     use crate::hash::highway_hash_64;
 
