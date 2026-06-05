@@ -409,11 +409,14 @@ impl<R: Read + Seek> RecordReader<R> {
         // The metadata chunk, if present, is at offset 64 (right after signature).
         let metadata_chunk_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // = 64
 
-        // Peek at the chunk header at offset 64.
-        let ch = match self.peek_chunk_header(metadata_chunk_pos) {
-            Ok(Some(ch)) => ch,
-            Ok(None) => return Ok(None),
-            Err(_) => return Ok(None),
+        // Peek at the chunk header at offset 64. A clean EOF (file ends
+        // before any chunk) means no metadata; a real error — hash-invalid
+        // header, impossible claims, I/O failure — is corruption and must
+        // not be reported as "no metadata": a caller inspecting metadata
+        // first would proceed as if the file were clean.
+        let ch = match self.peek_chunk_header(metadata_chunk_pos)? {
+            Some(ch) => ch,
+            None => return Ok(None),
         };
 
         if !matches!(ch.chunk_type(), Ok(ChunkType::FileMetadata)) {
@@ -1906,6 +1909,29 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// A corrupt chunk header where the metadata chunk would live must
+    /// surface as an error from the metadata APIs, not as "no metadata" —
+    /// a caller inspecting metadata first must not conclude the file is
+    /// clean.
+    #[test]
+    fn metadata_peek_propagates_corruption() {
+        let mut data = write_records(&[b"only"], WriterOptions::new());
+        data[64] ^= 0xFF; // corrupt the first chunk header after the signature
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert!(
+            reader.read_serialized_metadata().is_err(),
+            "corruption at the metadata position must not read as absent metadata"
+        );
+
+        // Sanity: an intact file without a metadata chunk still reports None.
+        let clean = write_records(&[b"only"], WriterOptions::new());
+        let mut reader =
+            RecordReader::new(Cursor::new(clean), ReaderOptions::new()).expect("reader new ok");
+        assert!(reader.read_serialized_metadata().expect("ok").is_none());
     }
 
     /// The signature chunk is a fixed constant; a hash-valid signature
