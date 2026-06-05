@@ -112,7 +112,29 @@ impl FieldProjection {
     pub(crate) fn includes_top_level_field(&self, field_number: u32) -> bool {
         match &self.fields {
             None => true,
-            Some(fields) => fields.iter().any(|f| f.path.first() == Some(&field_number)),
+            // An empty path means "include everything" — it must match every
+            // field, not none (path.first() of an empty path is None, which
+            // silently excluded all fields not otherwise listed).
+            Some(fields) => fields
+                .iter()
+                .any(|f| f.path.is_empty() || f.path.first() == Some(&field_number)),
+        }
+    }
+
+    /// True if `field_number` appears anywhere in any projected path (or the
+    /// projection includes everything).
+    ///
+    /// Used by transpose buffer pruning: nested fields' states carry the
+    /// INNER field's tag, so pruning by top-level field number alone starves
+    /// the buffers behind paths of length >= 2 and their values silently
+    /// decode as zeros. Matching at any depth is conservative — it may keep
+    /// a buffer that projection later drops, but it can never starve one.
+    pub(crate) fn mentions_field(&self, field_number: u32) -> bool {
+        match &self.fields {
+            None => true,
+            Some(fields) => fields
+                .iter()
+                .any(|f| f.path.is_empty() || f.path.contains(&field_number)),
         }
     }
 

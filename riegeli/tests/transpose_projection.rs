@@ -476,3 +476,93 @@ fn test_size_preserves_position_mid_read() {
         "position should be preserved after size()"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests: projections that silently zeroed or dropped data
+// ---------------------------------------------------------------------------
+
+/// An empty-path Field means "include everything". Two code paths used to
+/// disagree: the include map treated it as projection-disabled while buffer
+/// pruning matched it against nothing — so every field not otherwise listed
+/// came back with a correct tag and a silently zeroed value.
+#[test]
+fn empty_path_field_includes_everything() {
+    let records: Vec<Vec<u8>> = (0..4)
+        .map(|i| make_proto_record(1000 + i, 0xDEAD_0000 + i as u32, b"payload"))
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+    let data = write_records(
+        &record_refs,
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), records.len());
+    for (g, w) in got.iter().zip(&records) {
+        assert_eq!(g, w, "empty-path projection must reproduce the full record");
+    }
+}
+
+/// A nested-path projection (len >= 2) must decode the inner field's real
+/// value. Buffer pruning used to match only top-level field numbers, so the
+/// buffer behind the inner field was starved and its value decoded as zeros.
+#[test]
+fn nested_path_projection_preserves_inner_values() {
+    // field 1 = submessage { field 2 = varint }
+    let inner = encode_varint_field(2, 777);
+    let outer = encode_string_field(1, &inner);
+    let records = [outer.as_slice(), outer.as_slice()];
+    let data = write_records(
+        &records,
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![1, 2]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), 2);
+    for g in &got {
+        // Parse: outer tag, length, then the inner varint field 2 == 777.
+        let (outer_tag, c1) = decode_u32(g).expect("outer tag");
+        assert_eq!(outer_tag >> 3, 1);
+        let (_len, c2) = decode_u32(&g[c1..]).expect("outer len");
+        let inner_bytes = &g[c1 + c2..];
+        let (inner_tag, c3) = decode_u32(inner_bytes).expect("inner tag");
+        assert_eq!(inner_tag >> 3, 2);
+        let (value, _) = decode_u32(&inner_bytes[c3..]).expect("inner value");
+        assert_eq!(value, 777, "nested projection must carry the real value, not zeros");
+    }
+}
+
+/// existence_only on a submessage field must emit tag + zero length in
+/// transpose chunks, exactly as the simple-chunk path does — it used to
+/// drop the field entirely (tag included).
+#[test]
+fn existence_only_submessage_emits_tag_in_transpose() {
+    let inner = encode_varint_field(2, 777);
+    let outer = encode_string_field(1, &inner);
+    let records = [outer.as_slice()];
+
+    // The documented output (matching the simple-chunk path): the field's
+    // LengthDelimited tag followed by a zero length.
+    let mut expected = encode_u32((1 << 3) | 2);
+    expected.push(0x00);
+
+    let data = write_records(
+        &records,
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]).existence_only());
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0], expected,
+        "transpose existence-only submessage must match the simple-chunk output"
+    );
+}
