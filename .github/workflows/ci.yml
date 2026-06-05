@@ -28,11 +28,17 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Test
+      - name: Test (all features)
+        run: cargo test -p riegeli --all-features
+
+      - name: Test (default features)
         run: cargo test -p riegeli
 
+      - name: Test (no default features)
+        run: cargo test -p riegeli --no-default-features
+
       - name: Build benchmarks
-        run: cargo build --benches -p riegeli
+        run: cargo build --benches -p riegeli --all-features
 
       - name: Docs
         run: cargo doc -p riegeli --no-deps --all-features

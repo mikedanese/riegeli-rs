@@ -1,5 +1,11 @@
 //! Integration tests for RecordReader API: size(), seek_back(), check_file_format().
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use std::io::Cursor;
 
 use riegeli::{
@@ -263,6 +269,7 @@ fn check_file_format_with_metadata() {
 
 // ─── Bonus: brotli-compressed file check_file_format ─────────────────────────
 #[test]
+#[cfg(feature = "brotli")]
 fn check_file_format_brotli() {
     let data = write_records(
         &[b"hello world, this is a test record with some length to trigger compression"],

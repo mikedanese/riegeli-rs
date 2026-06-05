@@ -425,6 +425,7 @@ fn test_33_2_empty_projection_returns_empty_records() {
 }
 
 #[test]
+#[cfg(feature = "snappy")]
 fn test_33_2_empty_projection_with_compression() {
     let records: Vec<Vec<u8>> = (0..20u64)
         .map(|i| {
@@ -672,6 +673,7 @@ fn test_33_existence_only_large_varint_value() {
 }
 
 #[test]
+#[cfg(all(feature = "brotli", feature = "snappy"))]
 fn test_33_existence_only_with_brotli_compression() {
     let records: Vec<Vec<u8>> = (0..20u64)
         .map(|i| {

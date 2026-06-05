@@ -85,6 +85,7 @@ where
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_rust_write_tiny_chunks_brotli_cpp_read() {
     // 200 records × ~13 bytes each with chunk_size=128 → many separate chunks
     let records: Vec<Vec<u8>> = (0..200)
@@ -106,6 +107,7 @@ fn adv_rust_write_tiny_chunks_brotli_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_cpp_write_tiny_chunks_brotli_rust_read() {
     let records: Vec<Vec<u8>> = (0..200)
         .map(|i| format!("rec-{i:04}").into_bytes())
@@ -134,6 +136,7 @@ fn adv_cpp_write_tiny_chunks_brotli_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_rust_write_560_records_brotli_cpp_read() {
     // Use repetitive content (compresses well) to keep data_size < num_records
     let records: Vec<Vec<u8>> = (0..560).map(|_| vec![0xABu8; 20]).collect();
@@ -151,6 +154,7 @@ fn adv_rust_write_560_records_brotli_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_rust_write_1000_repetitive_brotli_cpp_read() {
     // 1000 records of all-zeros (extreme compressibility: data_size << num_records)
     let records: Vec<Vec<u8>> = (0..1000).map(|_| vec![0u8; 100]).collect();
@@ -210,6 +214,7 @@ fn adv_cpp_write_large_record_spans_block_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_rust_write_read_twice_by_cpp() {
     let records: Vec<Vec<u8>> = (0..50)
         .map(|i| format!("record-{i}").into_bytes())
@@ -238,6 +243,7 @@ fn adv_rust_write_read_twice_by_cpp() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adv_rust_write_mixed_sizes_zstd_cpp_read() {
     let mut records: Vec<Vec<u8>> = Vec::new();
     for i in 0..100 {
@@ -261,6 +267,7 @@ fn adv_rust_write_mixed_sizes_zstd_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adv_cpp_write_mixed_sizes_zstd_rust_read() {
     let mut records: Vec<Vec<u8>> = Vec::new();
     for i in 0..100 {
@@ -291,6 +298,7 @@ fn adv_cpp_write_mixed_sizes_zstd_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_all_byte_values_per_record_rust_write_cpp_read() {
     // 10 records, each containing all 256 byte values
     let base: Vec<u8> = (0u8..=255u8).collect();
@@ -309,6 +317,7 @@ fn adv_all_byte_values_per_record_rust_write_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_all_byte_values_per_record_cpp_write_rust_read() {
     let base: Vec<u8> = (0u8..=255u8).collect();
     let records: Vec<Vec<u8>> = (0..10).map(|_| base.clone()).collect();

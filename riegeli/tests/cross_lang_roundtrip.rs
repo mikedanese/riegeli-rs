@@ -1,5 +1,11 @@
 //! Cross-language roundtrip tests: files written by Rust are readable by C++ and vice versa.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 mod common;
 
 use common::{
@@ -49,6 +55,7 @@ fn criterion_20_2_cpp_write_none_100_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_3_rust_write_brotli6_10k_cpp_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
@@ -69,6 +76,7 @@ fn criterion_20_3_rust_write_brotli6_10k_cpp_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_4_cpp_write_brotli6_10k_rust_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
@@ -89,6 +97,7 @@ fn criterion_20_4_cpp_write_brotli6_10k_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_20_5a_rust_write_zstd3_cpp_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
@@ -105,6 +114,7 @@ fn criterion_20_5a_rust_write_zstd3_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_20_5b_cpp_write_zstd3_rust_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
@@ -163,6 +173,7 @@ fn criterion_20_6b_cpp_write_snappy_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_7a_rust_write_brotli_single_record_cpp_read() {
     let records = vec![b"the only record".to_vec()];
     cross_lang_roundtrip(
@@ -179,6 +190,7 @@ fn criterion_20_7a_rust_write_brotli_single_record_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_7b_cpp_write_brotli_single_record_rust_read() {
     let records = vec![b"the only record".to_vec()];
     cross_lang_roundtrip(
@@ -195,6 +207,7 @@ fn criterion_20_7b_cpp_write_brotli_single_record_rust_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
@@ -211,6 +224,7 @@ fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_20_7d_cpp_write_brotli_empty_file_rust_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
@@ -286,6 +300,7 @@ fn extra_cpp_write_none_binary_records_rust_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn extra_rust_write_brotli_zero_len_records_cpp_read() {
     // Zero-length records (empty payload) round-trip correctly.
     let records: Vec<Vec<u8>> = (0..10).map(|_| vec![]).collect();
@@ -303,6 +318,7 @@ fn extra_rust_write_brotli_zero_len_records_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn extra_cpp_write_brotli_zero_len_records_rust_read() {
     let records: Vec<Vec<u8>> = (0..10).map(|_| vec![]).collect();
     cross_lang_roundtrip(

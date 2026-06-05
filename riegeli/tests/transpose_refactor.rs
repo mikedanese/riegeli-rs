@@ -181,6 +181,7 @@ fn adversarial_many_identical_records_state_machine() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_brotli_compressed_transpose() {
     let record = vec![0x08, 0x2A];
     let records: Vec<&[u8]> = vec![record.as_slice(); 100];

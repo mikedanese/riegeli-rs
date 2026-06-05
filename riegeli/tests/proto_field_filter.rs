@@ -1,5 +1,11 @@
 //! Sprint 28: Field Filtering, Copying, and Composition tests.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use riegeli::proto::{
     DynamicHandlerSet, FieldHandler, FieldValue, FilteredFieldIter, HandleField, ProtoField,
     ProtoFieldIter, SerializedMessageWriter, StaticHandlerSet, WireType, copy_fields, read_message,

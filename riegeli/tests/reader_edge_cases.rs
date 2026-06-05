@@ -1,5 +1,11 @@
 //! Integration tests for RecordReader edge cases: empty files, metadata, missing metadata.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use std::io::Cursor;
 use std::sync::{
     Arc,
@@ -211,6 +217,7 @@ fn adv_g_check_file_format_detects_bad_block_header() {
 
 // ── H: read_metadata() works with Brotli-compressed data file ────────────────
 #[test]
+#[cfg(feature = "brotli")]
 fn adv_h_read_metadata_with_brotli_records() {
     let meta = b"brotli-schema-v1".to_vec();
     let data = write_records(

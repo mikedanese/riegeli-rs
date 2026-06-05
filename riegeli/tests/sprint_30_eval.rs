@@ -501,6 +501,7 @@ fn eval_adv_brotli_multi_bucket_projection() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn eval_adv_zstd_multi_bucket_projection() {
     let records: Vec<Vec<u8>> = (0..80u64).map(|i| make_wide_record(i)).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();

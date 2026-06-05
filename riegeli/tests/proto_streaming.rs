@@ -1,5 +1,11 @@
 //! Sprint 29 tests: End-to-End Streaming and Cross-Language Conformance.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 mod common;
 
 use std::io::Cursor;

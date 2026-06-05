@@ -11,6 +11,7 @@ use riegeli_ffi::{Compression, WriterOptions as FfiWriterOptions};
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_transpose_all_empty_records_rust_to_cpp() {
     let records: Vec<Vec<u8>> = (0..50).map(|_| vec![]).collect();
     cross_lang_roundtrip(
@@ -29,6 +30,7 @@ fn adversarial_transpose_all_empty_records_rust_to_cpp() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_transpose_all_empty_records_cpp_to_rust() {
     let records: Vec<Vec<u8>> = (0..50).map(|_| vec![]).collect();
     cross_lang_roundtrip(
@@ -51,6 +53,7 @@ fn adversarial_transpose_all_empty_records_cpp_to_rust() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adversarial_transpose_identical_records_rust_to_cpp() {
     let record = vec![0xDEu8; 256];
     let records: Vec<Vec<u8>> = (0..200).map(|_| record.clone()).collect();
@@ -70,6 +73,7 @@ fn adversarial_transpose_identical_records_rust_to_cpp() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adversarial_transpose_identical_records_cpp_to_rust() {
     let record = vec![0xDEu8; 256];
     let records: Vec<Vec<u8>> = (0..200).map(|_| record.clone()).collect();
@@ -93,6 +97,7 @@ fn adversarial_transpose_identical_records_cpp_to_rust() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_transpose_high_entropy_rust_to_cpp() {
     // Use a simple LCG to generate pseudo-random bytes
     let mut seed: u64 = 0xDEADBEEFCAFE;
@@ -122,6 +127,7 @@ fn adversarial_transpose_high_entropy_rust_to_cpp() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_transpose_high_entropy_cpp_to_rust() {
     let mut seed: u64 = 0xDEADBEEFCAFE;
     let records: Vec<Vec<u8>> = (0..100)
@@ -211,6 +217,7 @@ fn adversarial_transpose_proto_like_bytes_cpp_to_rust() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adversarial_transpose_single_large_record_rust_to_cpp() {
     // 64 KiB record through transpose+zstd
     let records = vec![vec![0x42u8; 65536]];
@@ -230,6 +237,7 @@ fn adversarial_transpose_single_large_record_rust_to_cpp() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adversarial_transpose_single_large_record_cpp_to_rust() {
     let records = vec![vec![0x42u8; 65536]];
     cross_lang_roundtrip(

@@ -3,6 +3,12 @@
 //! These tests probe edge cases, off-by-one errors, and boundary conditions
 //! in the proto streaming module.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 mod common;
 
 use std::cell::{Cell, RefCell};

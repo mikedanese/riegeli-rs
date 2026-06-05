@@ -216,6 +216,7 @@ fn eval_31_6_nested_submessage_projection_field1_only() {
 // =========================================================================
 
 #[test]
+#[cfg(feature = "brotli")]
 fn eval_31_projection_with_brotli() {
     let mut record = encode_varint_field(1, 42);
     record.extend(encode_varint_field(2, 99));

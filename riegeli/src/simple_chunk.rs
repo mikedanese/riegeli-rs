@@ -23,7 +23,9 @@
 //! ```
 
 use crate::chunk_header::{ChunkHeader, ChunkType};
-use crate::compression::{CompressOptions, CompressionType, decompress_data};
+#[cfg(any(feature = "brotli", feature = "zstd", feature = "snappy"))]
+use crate::compression::decompress_data;
+use crate::compression::{CompressOptions, CompressionType};
 use crate::error::RiegeliError;
 use crate::varint::{decode_u64, encode_u64};
 
@@ -162,6 +164,7 @@ impl SimpleChunkEncoder {
 ///   then varint64(uncompressed_sizes_len), then compressed sizes data.
 /// - `EncodeAndClose` for values: writes varint64(uncompressed_values_len),
 ///   then compressed values data.
+#[cfg(any(feature = "brotli", feature = "zstd", feature = "snappy"))]
 fn encode_compressed<F>(
     records: &[Vec<u8>],
     compression: CompressionType,
@@ -375,6 +378,7 @@ fn decode_uncompressed(
 /// - varint64(sizes_blob_len): byte count of the sizes blob below
 /// - sizes blob: varint64(uncompressed_sizes_len), compressed sizes data
 /// - values blob: varint64(uncompressed_values_len), compressed values data
+#[cfg(any(feature = "brotli", feature = "zstd", feature = "snappy"))]
 fn decode_compressed(
     payload: &[u8],
     num_records: usize,

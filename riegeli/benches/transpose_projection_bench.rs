@@ -5,7 +5,7 @@
 //!
 //! Run:
 //! ```text
-//! cargo bench -p riegeli --bench transpose_projection_bench --features "brotli,zstd,snappy"
+//! cargo bench -p riegeli --bench transpose_projection_bench --features "brotli,zstd"
 //! ```
 
 use std::io::Cursor;
