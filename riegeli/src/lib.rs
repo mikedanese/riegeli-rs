@@ -54,7 +54,10 @@ pub mod fuzz {
             num_records,
             decoded_data_size,
         );
-        let chunk = crate::simple_chunk::Chunk { header, data: body.to_vec() };
+        let chunk = crate::simple_chunk::Chunk {
+            header,
+            data: body.to_vec(),
+        };
         if let Ok(mut decoder) =
             crate::transpose::decoder::TransposeChunkDecoder::new_with_projection(chunk, None)
         {
@@ -69,6 +72,6 @@ pub use error::RiegeliError;
 pub use field_projection::{Field, FieldProjection};
 pub use proto_generated::RecordsMetadata;
 pub use record_position::RecordPosition;
-pub use skipped_region::SkippedRegion;
 pub use record_reader::{ReaderOptions, RecordReader};
 pub use record_writer::{RecordWriter, WriterOptions};
+pub use skipped_region::SkippedRegion;

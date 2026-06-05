@@ -22,7 +22,11 @@ impl SkippedRegion {
     /// Creates a `SkippedRegion` over `[begin, end)` with a message
     /// explaining why the region is invalid.
     pub(crate) fn new(begin: u64, end: u64, message: String) -> Self {
-        Self { begin, end, message }
+        Self {
+            begin,
+            end,
+            message,
+        }
     }
 
     /// File position of the beginning of the skipped region, inclusive.

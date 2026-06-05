@@ -219,7 +219,8 @@ fn seek_numeric_into_boundary_coincident_chunk() {
         }
         w.flush().expect("flush ok");
         for i in 0..30u32 {
-            w.write_record(format!("r{i}").as_bytes()).expect("write ok");
+            w.write_record(format!("r{i}").as_bytes())
+                .expect("write ok");
         }
         w.flush().expect("flush ok");
     }
@@ -245,17 +246,14 @@ fn seek_numeric_into_boundary_coincident_chunk() {
 
     // seek_numeric to record 5 of the boundary-coincident chunk:
     // numeric = canonical chunk_begin + record_index = 131072 + 5.
-    let mut reader =
-        RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("new ok");
+    let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("new ok");
     reader.seek_numeric(boundary + 5).expect("seek_numeric ok");
     let rec = reader
         .read_record()
         .expect("read after seek_numeric ok")
         .expect("record expected");
     assert_eq!(
-        rec,
-        b"r5",
+        rec, b"r5",
         "seek_numeric(boundary+5) must land on record 5 of the boundary-coincident chunk"
     );
 }
-

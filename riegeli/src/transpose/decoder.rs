@@ -635,8 +635,9 @@ impl TransposeChunkDecoder {
         let compression_type = CompressionType::try_from(data[0])?;
         pos += 1;
 
-        let (header_length, consumed) = decode_u64(&data[pos..])
-            .map_err(|e| RiegeliError::MalformedData(format!("reading header_length: {e}").into()))?;
+        let (header_length, consumed) = decode_u64(&data[pos..]).map_err(|e| {
+            RiegeliError::MalformedData(format!("reading header_length: {e}").into())
+        })?;
         pos += consumed;
 
         // checked_add: header_length is attacker-claimed; a wrapping add
@@ -838,9 +839,9 @@ impl TransposeChunkDecoder {
         for &size in bucket_compressed_sizes {
             // checked_add: size is attacker-claimed; a wrapping add would
             // let the bounds check pass and the slice below panic.
-            let end = pos.checked_add(size).ok_or_else(|| {
-                RiegeliError::MalformedData("bucket size overflows".into())
-            })?;
+            let end = pos
+                .checked_add(size)
+                .ok_or_else(|| RiegeliError::MalformedData("bucket size overflows".into()))?;
             if end > data.len() {
                 return Err(RiegeliError::MalformedData(
                     "bucket data extends past chunk data".into(),
@@ -866,7 +867,9 @@ impl TransposeChunkDecoder {
             return Ok(compressed.len());
         }
         let (size, _consumed) = decode_u64(compressed).map_err(|e| {
-            RiegeliError::MalformedData(format!("reading bucket uncompressed_size prefix: {e}").into())
+            RiegeliError::MalformedData(
+                format!("reading bucket uncompressed_size prefix: {e}").into(),
+            )
         })?;
         Ok(size as usize)
     }
@@ -909,10 +912,13 @@ impl TransposeChunkDecoder {
                 bucket_remaining = bucket_decompressed_sizes[bucket_index];
             }
             if buf_size > bucket_remaining {
-                return Err(RiegeliError::MalformedData(format!(
-                    "buffer {} (size {}) exceeds remaining bucket {} capacity ({})",
-                    i, buf_size, bucket_index, bucket_remaining
-                ).into()));
+                return Err(RiegeliError::MalformedData(
+                    format!(
+                        "buffer {} (size {}) exceeds remaining bucket {} capacity ({})",
+                        i, buf_size, bucket_index, bucket_remaining
+                    )
+                    .into(),
+                ));
             }
             buffer_to_bucket.push(bucket_index);
             bucket_remaining -= buf_size;
@@ -988,20 +994,22 @@ impl TransposeChunkDecoder {
             let is_needed = needed_buffers.get(i).copied().unwrap_or(true);
             if is_needed {
                 let decompressed = bucket_decompressed[bi].as_ref().ok_or_else(|| {
-                    RiegeliError::MalformedData(format!(
-                        "needed buffer {} in undecompressed bucket {}",
-                        i, bi
-                    ).into())
+                    RiegeliError::MalformedData(
+                        format!("needed buffer {} in undecompressed bucket {}", i, bi).into(),
+                    )
                 })?;
                 let end = offset + buf_size;
                 if end > decompressed.len() {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "buffer {} (size {}) exceeds bucket {} data (len {})",
-                        i,
-                        buf_size,
-                        bi,
-                        decompressed.len()
-                    ).into()));
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "buffer {} (size {}) exceeds bucket {} data (len {})",
+                            i,
+                            buf_size,
+                            bi,
+                            decompressed.len()
+                        )
+                        .into(),
+                    ));
                 }
                 buffers.push(BufferCursor::new(decompressed[offset..end].to_vec()));
             } else {
@@ -1073,10 +1081,13 @@ impl TransposeChunkDecoder {
             let (is_implicit, next_node_idx) = if next_raw >= num_states {
                 let adjusted = next_raw - num_states;
                 if adjusted >= num_states {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "node index {} too large (num_states={})",
-                        adjusted, num_states
-                    ).into()));
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "node index {} too large (num_states={})",
+                            adjusted, num_states
+                        )
+                        .into(),
+                    ));
                 }
                 (true, adjusted)
             } else {
@@ -1105,10 +1116,9 @@ impl TransposeChunkDecoder {
         // into the sentinel-only node table (found by fuzzing).
         let first_node = hdr.read_varint32()? as usize;
         if first_node >= num_states {
-            return Err(RiegeliError::MalformedData(format!(
-                "first_node {} >= num_states {}",
-                first_node, num_states
-            ).into()));
+            return Err(RiegeliError::MalformedData(
+                format!("first_node {} >= num_states {}", first_node, num_states).into(),
+            ));
         }
 
         // Add 0xFF failure sentinel nodes.
@@ -1270,10 +1280,9 @@ impl TransposeChunkDecoder {
         }
 
         if !is_valid_proto_tag(tag) {
-            return Err(RiegeliError::MalformedData(format!(
-                "invalid tag {} in state {}",
-                tag, state_index
-            ).into()));
+            return Err(RiegeliError::MalformedData(
+                format!("invalid tag {} in state {}", tag, state_index).into(),
+            ));
         }
 
         let tag_bytes = encode_u32(tag);
@@ -1287,9 +1296,7 @@ impl TransposeChunkDecoder {
         let buf_idx = if has_data_buffer(tag, st) {
             let idx = hdr.read_varint32()? as usize;
             if idx >= num_buffers {
-                return Err(RiegeliError::MalformedData(
-                    "buffer index too large".into(),
-                ));
+                return Err(RiegeliError::MalformedData("buffer index too large".into()));
             }
             Some(idx)
         } else {
@@ -1357,9 +1364,9 @@ impl TransposeChunkDecoder {
                 s if s == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE => {
                     Ok(CallbackType::SubmessageEnd)
                 }
-                _ => Err(RiegeliError::MalformedData(format!(
-                    "unknown LengthDelimited subtype {st}"
-                ).into())),
+                _ => Err(RiegeliError::MalformedData(
+                    format!("unknown LengthDelimited subtype {st}").into(),
+                )),
             },
             Some(WireType::StartGroup) | Some(WireType::EndGroup) => Ok(CallbackType::CopyTag),
             None => Err(RiegeliError::MalformedData(
@@ -1437,7 +1444,7 @@ fn resolve_select_callback(
         let walk_frames = if tag_wire_type(tmpl.tag) == Some(WireType::StartGroup) {
             &submessage_stack[..submessage_stack.len().saturating_sub(1)]
         } else {
-            &submessage_stack[..]
+            submessage_stack
         };
         for frame in walk_frames.iter() {
             let frame_node = &nodes[frame.node_index];
@@ -1447,8 +1454,9 @@ fn resolve_select_callback(
                 field_included = FieldIncluded::No;
                 break;
             }
-            let (frame_tag, _) = decode_u32(&frame_node.tag_data)
-                .map_err(|e| RiegeliError::MalformedData(format!("decoding frame tag: {e}").into()))?;
+            let (frame_tag, _) = decode_u32(&frame_node.tag_data).map_err(|e| {
+                RiegeliError::MalformedData(format!("decoding frame tag: {e}").into())
+            })?;
             let frame_field_number = tag_field_number(frame_tag);
 
             match include_map.get(current_parent_id, frame_field_number) {
@@ -1519,9 +1527,9 @@ fn callback_for_field_included(
                     s if s == subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE => {
                         Ok(CallbackType::SkippedSubmessageEnd)
                     }
-                    _ => Err(RiegeliError::MalformedData(format!(
-                        "unknown LengthDelimited subtype {st} in excluded field"
-                    ).into())),
+                    _ => Err(RiegeliError::MalformedData(
+                        format!("unknown LengthDelimited subtype {st} in excluded field").into(),
+                    )),
                 },
                 Some(WireType::StartGroup) => Ok(CallbackType::SkippedSubmessageStart),
                 Some(WireType::EndGroup) => Ok(CallbackType::SkippedSubmessageEnd),
@@ -1634,10 +1642,13 @@ fn execute_node_action(
                 ));
             }
             if state.skipped_submessage_level != 0 {
-                return Err(RiegeliError::MalformedData(format!(
-                    "skipped_submessage_level is {} at record boundary, expected 0",
-                    state.skipped_submessage_level
-                ).into()));
+                return Err(RiegeliError::MalformedData(
+                    format!(
+                        "skipped_submessage_level is {} at record boundary, expected 0",
+                        state.skipped_submessage_level
+                    )
+                    .into(),
+                ));
             }
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
@@ -1769,8 +1780,9 @@ fn skip_field_data(
         let tmpl = &node_templates[tmpl_idx];
         (tmpl.tag, tmpl.subtype)
     } else if !node.tag_data.is_empty() {
-        let (tag, _) = decode_u32(&node.tag_data)
-            .map_err(|e| RiegeliError::MalformedData(format!("decoding tag for skip: {e}").into()))?;
+        let (tag, _) = decode_u32(&node.tag_data).map_err(|e| {
+            RiegeliError::MalformedData(format!("decoding tag for skip: {e}").into())
+        })?;
         (tag, 0u8)
     } else {
         return Ok(());
@@ -2088,11 +2100,9 @@ fn run_state_machine(
         ));
     }
     if limits.len() as u64 != num_records {
-        return Err(RiegeliError::MalformedData(format!(
-            "expected {} records, got {}",
-            num_records,
-            limits.len()
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!("expected {} records, got {}", num_records, limits.len()).into(),
+        ));
     }
     Ok((dest, limits))
 }
@@ -2116,10 +2126,9 @@ fn finalize_records(
     if let Some(&last_limit) = limits.last()
         && last_limit != total_size
     {
-        return Err(RiegeliError::MalformedData(format!(
-            "last limit {} != total size {}",
-            last_limit, total_size
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!("last limit {} != total size {}", last_limit, total_size).into(),
+        ));
     }
     // Reverse and complement limits (C++ algorithm).
     {
@@ -2230,13 +2239,14 @@ mod tests {
     #[test]
     fn hostile_buffers_without_buckets_are_rejected() {
         let body: Vec<u8> = vec![
-            0x00, 0x7A, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x0A, 0x00, 0x7A, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x7A, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00,
+            0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x25, 0x0A, 0x00, 0x7A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
         ];
         let header = crate::chunk_header::ChunkHeader::from_parts(
@@ -2280,7 +2290,10 @@ mod tests {
             1,
             0,
         );
-        let chunk = crate::simple_chunk::Chunk { header, data: body.to_vec() };
+        let chunk = crate::simple_chunk::Chunk {
+            header,
+            data: body.to_vec(),
+        };
         let err = TransposeChunkDecoder::new_with_projection(chunk, None)
             .err()
             .expect("zero-state chunk with hostile first_node must error");
@@ -2316,7 +2329,10 @@ mod tests {
                 chunk.header.num_records(),
                 claim,
             );
-            let tampered = crate::simple_chunk::Chunk { header, data: chunk.data.clone() };
+            let tampered = crate::simple_chunk::Chunk {
+                header,
+                data: chunk.data.clone(),
+            };
             let err = match TransposeChunkDecoder::new_with_projection(tampered, None) {
                 Err(e) => e,
                 Ok(mut d) => {

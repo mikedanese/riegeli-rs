@@ -59,10 +59,13 @@ impl SerializedMessageWriter {
     /// Returns an error if there are unclosed length-delimited scopes.
     pub fn finish(self) -> Result<Vec<u8>, crate::RiegeliError> {
         if !self.scope_stack.is_empty() {
-            return Err(crate::RiegeliError::MalformedData(format!(
-                "finish() called with {} unclosed length-delimited scope(s)",
-                self.scope_stack.len()
-            ).into()));
+            return Err(crate::RiegeliError::MalformedData(
+                format!(
+                    "finish() called with {} unclosed length-delimited scope(s)",
+                    self.scope_stack.len()
+                )
+                .into(),
+            ));
         }
         Ok(self.buf)
     }
@@ -230,10 +233,13 @@ impl SerializedMessageWriter {
         data: &[u8],
     ) -> Result<(), crate::RiegeliError> {
         if data.len() > MAX_LENGTH_DELIMITED {
-            return Err(crate::RiegeliError::MalformedData(format!(
-                "length-delimited field length {} exceeds 2 GiB limit",
-                data.len()
-            ).into()));
+            return Err(crate::RiegeliError::MalformedData(
+                format!(
+                    "length-delimited field length {} exceeds 2 GiB limit",
+                    data.len()
+                )
+                .into(),
+            ));
         }
         encode_tag(&mut self.buf, field_number, WireType::LengthDelimited);
         encode_varint32(&mut self.buf, data.len() as u32);
@@ -277,10 +283,13 @@ impl SerializedMessageWriter {
 
         let content_len = self.buf.len() - content_start;
         if content_len > MAX_LENGTH_DELIMITED {
-            return Err(crate::RiegeliError::MalformedData(format!(
-                "length-delimited field length {} exceeds 2 GiB limit",
-                content_len
-            ).into()));
+            return Err(crate::RiegeliError::MalformedData(
+                format!(
+                    "length-delimited field length {} exceeds 2 GiB limit",
+                    content_len
+                )
+                .into(),
+            ));
         }
 
         // Encode the length varint into a temporary buffer, then splice it in.

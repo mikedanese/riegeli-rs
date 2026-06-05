@@ -81,8 +81,10 @@ pub fn chunk_end(chunk_begin: u64, data_size: u64, num_records: u64) -> u64 {
     // Saturation instead yields an end past any real stream, which readers
     // fail cleanly on at the next read.
     let begin = canonical_chunk_address(chunk_begin);
-    let end_from_data =
-        add_with_overhead(begin, crate::constants::CHUNK_HEADER_SIZE.saturating_add(data_size));
+    let end_from_data = add_with_overhead(
+        begin,
+        crate::constants::CHUNK_HEADER_SIZE.saturating_add(data_size),
+    );
     let end_from_records = round_up_to_possible_chunk_boundary(begin.saturating_add(num_records));
     end_from_data.max(end_from_records)
 }
@@ -257,9 +259,13 @@ mod tests {
     fn test_chunk_end_equal_addressing_invariant() {
         // chunk_end(boundary, ...) == chunk_end(boundary + 24, ...) — both
         // addresses describe the same chunk.
-        for (data_size, num_records) in
-            [(0u64, 0u64), (53, 131019), (100, 1), (70_000, 3), (10, 70_000)]
-        {
+        for (data_size, num_records) in [
+            (0u64, 0u64),
+            (53, 131019),
+            (100, 1),
+            (70_000, 3),
+            (10, 70_000),
+        ] {
             for boundary in [0u64, 65536, 131072] {
                 assert_eq!(
                     chunk_end(boundary, data_size, num_records),
@@ -286,14 +292,18 @@ mod tests {
         // They must agree for every canonical chunk_begin.
         fn cpp_add_with_overhead(chunk_begin: u64, length: u64) -> u64 {
             let usable = BLOCK_SIZE - BLOCK_HEADER_SIZE;
-            let num_overhead_blocks =
-                (length + (chunk_begin + usable - 1) % BLOCK_SIZE) / usable;
+            let num_overhead_blocks = (length + (chunk_begin + usable - 1) % BLOCK_SIZE) / usable;
             chunk_begin + length + num_overhead_blocks * BLOCK_HEADER_SIZE
         }
         let begins = [0u64, 25, 64, 1000, 65535, 65536, 65536 + 25, 131072, 131097];
-        let lengths = [0u64, 1, 40, 93, 65471, 65472, 65473, 65512, 65513, 131024, 200_000];
+        let lengths = [
+            0u64, 1, 40, 93, 65471, 65472, 65473, 65512, 65513, 131024, 200_000,
+        ];
         for &b in &begins {
-            assert!(is_possible_chunk_boundary(b), "test input {b} not canonical");
+            assert!(
+                is_possible_chunk_boundary(b),
+                "test input {b} not canonical"
+            );
             for &l in &lengths {
                 assert_eq!(
                     add_with_overhead(b, l),

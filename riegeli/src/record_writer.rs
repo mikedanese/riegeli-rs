@@ -250,10 +250,13 @@ impl<W: Write> RecordWriter<W> {
         if options.window_log.is_some() {
             match options.compression {
                 CompressionType::None | CompressionType::Snappy => {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "window_log is not applicable to compression type {:?}",
-                        options.compression
-                    ).into()));
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "window_log is not applicable to compression type {:?}",
+                            options.compression
+                        )
+                        .into(),
+                    ));
                 }
                 _ => {}
             }
@@ -1042,8 +1045,8 @@ mod tests {
             let data = buf.into_inner();
             max_interior = max_interior.max(interior_boundaries(&data));
 
-            let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())
-                .expect("reader new ok");
+            let mut reader =
+                RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
             let mut count = 0usize;
             loop {
                 match reader.read_record() {
@@ -1120,7 +1123,11 @@ mod tests {
                 // The boundary falls inside the padded chunk (which began at
                 // 64): previous_chunk = boundary - 64, next_chunk = distance
                 // to the following chunk address.
-                assert_eq!(bh.previous_chunk(), boundary - 64, "delta={delta} previous_chunk");
+                assert_eq!(
+                    bh.previous_chunk(),
+                    boundary - 64,
+                    "delta={delta} previous_chunk"
+                );
                 assert_eq!(
                     bh.next_chunk(),
                     expected_next_chunk - boundary,
@@ -1163,7 +1170,10 @@ mod tests {
                 let alias = crate::record_position::RecordPosition::new(boundary + 24, 0);
                 reader.seek(alias).expect("alias seek ok");
                 assert_eq!(
-                    reader.read_record().expect("read after alias seek").as_deref(),
+                    reader
+                        .read_record()
+                        .expect("read after alias seek")
+                        .as_deref(),
                     Some(&b"marker"[..]),
                     "delta=0: alias address must resolve to the same chunk"
                 );

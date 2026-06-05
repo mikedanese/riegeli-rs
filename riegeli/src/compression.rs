@@ -68,9 +68,9 @@ pub(crate) fn compress_brotli(
     let mut output = Vec::new();
     {
         let mut writer = brotli::CompressorWriter::new(&mut output, 4096, quality, lgwin);
-        writer
-            .write_all(input)
-            .map_err(|e| RiegeliError::MalformedData(format!("brotli compress error: {e}").into()))?;
+        writer.write_all(input).map_err(|e| {
+            RiegeliError::MalformedData(format!("brotli compress error: {e}").into())
+        })?;
     }
     Ok(output)
 }
@@ -84,17 +84,18 @@ pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u
         use std::io::Write as _;
         let mut output = Vec::new();
         {
-            let mut encoder = zstd::Encoder::new(&mut output, level)
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd encoder init: {e}").into()))?;
+            let mut encoder = zstd::Encoder::new(&mut output, level).map_err(|e| {
+                RiegeliError::MalformedData(format!("zstd encoder init: {e}").into())
+            })?;
             encoder
                 .window_log(wlog)
                 .map_err(|e| RiegeliError::MalformedData(format!("zstd window_log: {e}").into()))?;
-            encoder
-                .write_all(input)
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}").into()))?;
-            encoder
-                .finish()
-                .map_err(|e| RiegeliError::MalformedData(format!("zstd finish error: {e}").into()))?;
+            encoder.write_all(input).map_err(|e| {
+                RiegeliError::MalformedData(format!("zstd compress error: {e}").into())
+            })?;
+            encoder.finish().map_err(|e| {
+                RiegeliError::MalformedData(format!("zstd finish error: {e}").into())
+            })?;
         }
         output
     } else {
@@ -244,10 +245,13 @@ pub(crate) fn decompress_with_prefix(
     })?;
     let out = decompress_data_capped(&data[consumed..], compression, uncompressed_size)?;
     if out.len() as u64 != uncompressed_size {
-        return Err(RiegeliError::MalformedData(format!(
-            "decompressed size {} != declared {uncompressed_size}",
-            out.len()
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "decompressed size {} != declared {uncompressed_size}",
+                out.len()
+            )
+            .into(),
+        ));
     }
     Ok(out)
 }
@@ -263,9 +267,9 @@ pub(crate) fn decompress_data_capped(
     use std::io::Read as _;
     let check = |out: Vec<u8>| {
         if out.len() as u64 > max_len {
-            Err(RiegeliError::MalformedData(format!(
-                "decompressed data exceeds its declared size ({max_len} bytes)"
-            ).into()))
+            Err(RiegeliError::MalformedData(
+                format!("decompressed data exceeds its declared size ({max_len} bytes)").into(),
+            ))
         } else {
             Ok(out)
         }
@@ -276,8 +280,7 @@ pub(crate) fn decompress_data_capped(
             #[cfg(feature = "brotli")]
             {
                 const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
-                let mut out =
-                    Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
+                let mut out = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
                 let reader = brotli::Decompressor::new(data, 4096);
                 reader
                     .take(max_len.saturating_add(1))
@@ -289,15 +292,16 @@ pub(crate) fn decompress_data_capped(
             }
             #[cfg(not(feature = "brotli"))]
             {
-                Err(RiegeliError::UnsupportedCompression(CompressionType::Brotli as u8))
+                Err(RiegeliError::UnsupportedCompression(
+                    CompressionType::Brotli as u8,
+                ))
             }
         }
         CompressionType::Zstd => {
             #[cfg(feature = "zstd")]
             {
                 const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
-                let mut out =
-                    Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
+                let mut out = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
                 let reader = zstd::stream::read::Decoder::new(data).map_err(|e| {
                     RiegeliError::MalformedData(format!("zstd decoder init: {e}").into())
                 })?;
@@ -311,7 +315,9 @@ pub(crate) fn decompress_data_capped(
             }
             #[cfg(not(feature = "zstd"))]
             {
-                Err(RiegeliError::UnsupportedCompression(CompressionType::Zstd as u8))
+                Err(RiegeliError::UnsupportedCompression(
+                    CompressionType::Zstd as u8,
+                ))
             }
         }
         CompressionType::Snappy => {
@@ -323,15 +329,18 @@ pub(crate) fn decompress_data_capped(
                     RiegeliError::MalformedData(format!("snappy length error: {e}").into())
                 })?;
                 if declared as u64 > max_len {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "decompressed data exceeds its declared size ({max_len} bytes)"
-                    ).into()));
+                    return Err(RiegeliError::MalformedData(
+                        format!("decompressed data exceeds its declared size ({max_len} bytes)")
+                            .into(),
+                    ));
                 }
                 decompress_snappy(data)
             }
             #[cfg(not(feature = "snappy"))]
             {
-                Err(RiegeliError::UnsupportedCompression(CompressionType::Snappy as u8))
+                Err(RiegeliError::UnsupportedCompression(
+                    CompressionType::Snappy as u8,
+                ))
             }
         }
     }

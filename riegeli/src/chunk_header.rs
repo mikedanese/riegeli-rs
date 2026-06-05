@@ -145,9 +145,9 @@ impl ChunkHeader {
             b'p' => Ok(ChunkType::Padding),
             b'r' => Ok(ChunkType::Simple),
             b't' => Ok(ChunkType::Transposed),
-            _ => Err(RiegeliError::MalformedData(format!(
-                "unknown chunk type byte: {byte:#04x}"
-            ).into())),
+            _ => Err(RiegeliError::MalformedData(
+                format!("unknown chunk type byte: {byte:#04x}").into(),
+            )),
         }
     }
 
