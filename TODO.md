@@ -38,6 +38,15 @@ Roadmap for riegeli-rs.
   processing framework.
 - **`ContextProjection`** — richer projection API integrated with proto
   descriptors.
+- **Projection include-resolution: deliberate divergence from C++.** This
+  implementation resolves field inclusion per visit, keyed by the full
+  ancestry context. The C++ reference caches the resolution on first visit,
+  which makes its output order-dependent when the same field number appears
+  both in an included context and inside an excluded group (one wire order
+  emits excluded data, the mirrored order omits included data). The
+  divergence is documented and both orders are pinned as known-divergent
+  cases in `riegeli/tests/differential.rs` (cases J/J2); revisit if the
+  reference implementation changes its resolution behavior.
 
 ### Flush durability levels
 
