@@ -139,6 +139,88 @@ std::unique_ptr<StringRecordReader> new_record_reader(
   return r;
 }
 
+std::unique_ptr<StringRecordReader> new_record_reader_with_options(
+    rust::Slice<const uint8_t> input,
+    rust::Slice<const uint32_t> projection_paths_flat, bool collect_recovery,
+    int32_t cancel_after) {
+  auto r = std::make_unique<StringRecordReader>();
+  r->input.assign(reinterpret_cast<const char*>(input.data()), input.size());
+
+  riegeli::RecordReaderBase::Options opts;
+
+  if (!projection_paths_flat.empty()) {
+    riegeli::FieldProjection projection;
+    riegeli::Field field;
+    for (size_t i = 0; i < projection_paths_flat.size(); ++i) {
+      const uint32_t v = projection_paths_flat[i];
+      if (v == 0xFFFFFFFFu) {
+        projection.AddField(std::move(field));
+        field = riegeli::Field();
+      } else {
+        field.AddFieldNumber(static_cast<int>(v));
+      }
+    }
+    projection.AddField(std::move(field));
+    opts.set_field_projection(std::move(projection));
+  }
+
+  if (collect_recovery) {
+    r->skipped = std::make_shared<std::vector<riegeli::SkippedRegion>>();
+    auto skipped = r->skipped;
+    const int32_t cancel_at = cancel_after;
+    opts.set_recovery(
+        [skipped, cancel_at](const riegeli::SkippedRegion& region,
+                             riegeli::RecordReaderBase&) {
+          skipped->push_back(region);
+          if (cancel_at >= 0 &&
+              skipped->size() > static_cast<size_t>(cancel_at)) {
+            return false;
+          }
+          return true;
+        });
+  }
+
+  r->reader = std::make_unique<riegeli::RecordReader<riegeli::StringReader<>>>(
+      riegeli::Maker(absl::string_view(r->input)), std::move(opts));
+  if (!r->reader->ok()) {
+    r->is_ok = false;
+    r->error_message = r->reader->status().ToString();
+  }
+  return r;
+}
+
+size_t reader_skipped_count(const StringRecordReader& reader) {
+  return reader.skipped ? reader.skipped->size() : 0;
+}
+
+uint64_t reader_skipped_begin(const StringRecordReader& reader, size_t i) {
+  return (*reader.skipped)[i].begin();
+}
+
+uint64_t reader_skipped_end(const StringRecordReader& reader, size_t i) {
+  return (*reader.skipped)[i].end();
+}
+
+rust::String reader_skipped_message(const StringRecordReader& reader,
+                                    size_t i) {
+  return rust::String(std::string((*reader.skipped)[i].message()));
+}
+
+uint64_t reader_pos_numeric(const StringRecordReader& reader) {
+  if (!reader.reader) return 0;
+  return reader.reader->pos().numeric();
+}
+
+bool reader_seek_numeric(StringRecordReader& reader, uint64_t pos) {
+  if (!reader.reader) return false;
+  const bool ok = reader.reader->Seek(riegeli::Position{pos});
+  if (!ok && !reader.reader->ok()) {
+    reader.is_ok = false;
+    reader.error_message = reader.reader->status().ToString();
+  }
+  return ok;
+}
+
 bool reader_read_next(StringRecordReader& reader) {
   if (!reader.reader || !reader.is_ok) return false;
   absl::string_view record;
