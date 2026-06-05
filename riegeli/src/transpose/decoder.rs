@@ -1607,6 +1607,11 @@ fn execute_node_action(
                     state.skipped_submessage_level
                 ).into()));
             }
+            if !state.existence_only_levels.is_empty() {
+                return Err(RiegeliError::MalformedData(
+                    "unmatched existence-only submessage at record boundary".into(),
+                ));
+            }
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
             }
