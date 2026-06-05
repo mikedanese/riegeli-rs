@@ -529,26 +529,27 @@ impl<W: Write> RecordWriter<W> {
         // If the chunk data ended before `chunk_end_pos`, write zero-padding bytes so
         // the file position advances to `chunk_end_pos`. This matches the C++ behaviour
         // where `WritePadding(chunk_begin, chunk_end, dest)` is called after the data.
-        if self.file_pos < chunk_end_pos {
-            let mut remaining = chunk_end_pos - self.file_pos;
-            while remaining > 0 {
-                if self.file_pos.is_multiple_of(BLOCK_SIZE) {
-                    let block_pos = self.file_pos;
-                    let prev = block_pos - chunk_start;
-                    let next = chunk_end_pos - block_pos;
-                    let bh = crate::block_header::BlockHeader::from_parts(prev, next);
-                    self.writer.write_all(&bh.to_bytes())?;
-                    self.file_pos += BLOCK_HEADER_SIZE;
-                    continue;
-                }
-                let pos_in_block = self.file_pos % BLOCK_SIZE;
-                let space_in_block = BLOCK_SIZE - pos_in_block;
-                let to_write = remaining.min(space_in_block) as usize;
-                let pad = vec![0u8; to_write];
-                self.writer.write_all(&pad)?;
-                self.file_pos += to_write as u64;
-                remaining -= to_write as u64;
+        // Loop on file_pos rather than a separate byte counter: block headers
+        // emitted at boundaries advance the file position toward chunk_end_pos
+        // just like padding bytes do. A counter that doesn't account for them
+        // overshoots the chunk end — writing zeros where the next chunk header
+        // belongs — or underflows computing a block header's next_chunk field.
+        while self.file_pos < chunk_end_pos {
+            if self.file_pos.is_multiple_of(BLOCK_SIZE) {
+                let block_pos = self.file_pos;
+                let prev = block_pos - chunk_start;
+                let next = chunk_end_pos - block_pos;
+                let bh = crate::block_header::BlockHeader::from_parts(prev, next);
+                self.writer.write_all(&bh.to_bytes())?;
+                self.file_pos += BLOCK_HEADER_SIZE;
+                continue;
             }
+            let pos_in_block = self.file_pos % BLOCK_SIZE;
+            let space_in_block = BLOCK_SIZE - pos_in_block;
+            let to_write = (chunk_end_pos - self.file_pos).min(space_in_block) as usize;
+            let pad = vec![0u8; to_write];
+            self.writer.write_all(&pad)?;
+            self.file_pos += to_write as u64;
         }
 
         Ok(())
@@ -977,5 +978,94 @@ mod tests {
         let opts = WriterOptions::new().transpose(true);
         let result = roundtrip_with_reader(&[], opts);
         assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Padding that spans block boundaries (record-count-dominated chunk end)
+    // -------------------------------------------------------------------------
+
+    use std::io::Cursor;
+
+    /// Many empty records with compression make `num_records` exceed the
+    /// chunk's physical data bytes, so the chunk end comes from
+    /// `round_up_to_possible_chunk_boundary(chunk_begin + num_records)` and
+    /// the writer pads tens of kilobytes — crossing block boundaries. The
+    /// padding loop must count emitted block headers toward the distance to
+    /// the chunk end; a loop that doesn't overshoots the chunk end (zeros
+    /// where the next chunk header belongs) and the file fails to read back.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn record_count_padding_across_block_boundaries() {
+        use crate::record_reader::{ReaderOptions, RecordReader};
+
+        // Sweep counts so chunk_begin + num_records lands before, inside, and
+        // after block-header windows, crossing one and two boundaries.
+        for n in [70_000usize, 131_000, 131_020, 131_080, 200_000, 262_100] {
+            let mut buf = Cursor::new(Vec::<u8>::new());
+            {
+                let mut w = RecordWriter::new(
+                    &mut buf,
+                    WriterOptions::new().compression(CompressionType::Zstd),
+                )
+                .expect("writer new ok");
+                for _ in 0..n {
+                    w.write_record(b"").expect("write ok");
+                }
+                w.flush().expect("flush ok");
+            }
+            let data = buf.into_inner();
+
+            let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())
+                .expect("reader new ok");
+            let mut count = 0usize;
+            loop {
+                match reader.read_record() {
+                    Ok(Some(rec)) => {
+                        assert!(rec.is_empty(), "n={n}: record {count} not empty");
+                        count += 1;
+                    }
+                    Ok(None) => break,
+                    Err(e) => panic!("n={n}: read failed after {count} records: {e:?}"),
+                }
+            }
+            assert_eq!(count, n, "n={n}: record count mismatch");
+        }
+    }
+
+    /// Same shape, but with a second chunk after the padded one: the next
+    /// chunk must begin exactly at the computed chunk end, which only holds
+    /// if padding stopped there.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn chunk_after_record_count_padding() {
+        use crate::record_reader::{ReaderOptions, RecordReader};
+
+        let n = 131_020usize;
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = RecordWriter::new(
+                &mut buf,
+                WriterOptions::new().compression(CompressionType::Zstd),
+            )
+            .expect("writer new ok");
+            for _ in 0..n {
+                w.write_record(b"").expect("write ok");
+            }
+            w.flush().expect("flush ok");
+            w.write_record(b"after-the-padding").expect("write ok");
+            w.flush().expect("flush ok");
+        }
+        let data = buf.into_inner();
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        let mut count = 0usize;
+        let mut last = Vec::new();
+        while let Some(rec) = reader.read_record().expect("read ok") {
+            count += 1;
+            last = rec;
+        }
+        assert_eq!(count, n + 1);
+        assert_eq!(last, b"after-the-padding");
     }
 }
