@@ -143,11 +143,8 @@ fn small_alignment_padding_lands_on_multiples() {
     for alignment in [8u64, 15, 16, 24, 32, 48, 64] {
         let mut buf = Cursor::new(Vec::<u8>::new());
         {
-            let mut w = RecordWriter::new(
-                &mut buf,
-                WriterOptions::new().final_padding(alignment),
-            )
-            .expect("writer new ok");
+            let mut w = RecordWriter::new(&mut buf, WriterOptions::new().final_padding(alignment))
+                .expect("writer new ok");
             w.write_record(b"x").expect("write ok");
             w.close().expect("close ok");
         }
@@ -160,7 +157,10 @@ fn small_alignment_padding_lands_on_multiples() {
         );
         let mut reader =
             RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader ok");
-        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"x"[..]));
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"x"[..])
+        );
         assert_eq!(reader.read_record().expect("read ok"), None);
     }
 }

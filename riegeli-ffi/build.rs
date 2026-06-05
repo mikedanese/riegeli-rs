@@ -103,7 +103,10 @@ fn download_and_extract(name: &str, url: &str, expected_hash: &str, deps_dir: &P
     let tarball = deps_dir.join(format!("{name}.tar.gz"));
     let prepopulated = tarball.exists();
     let buf = if prepopulated {
-        eprintln!("Using pre-populated {name} tarball at {}...", tarball.display());
+        eprintln!(
+            "Using pre-populated {name} tarball at {}...",
+            tarball.display()
+        );
         fs::read(&tarball).unwrap_or_else(|e| panic!("Failed to read {name} tarball: {e}"))
     } else {
         let url = apply_mirror(url);

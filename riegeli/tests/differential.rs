@@ -53,8 +53,8 @@ fn rust_read_collecting(data: &[u8]) -> (Vec<Vec<u8>>, Vec<SkippedRegion>, u64) 
 
 /// Read everything with the C++ reader + collecting recovery.
 fn cpp_read_collecting(data: &[u8]) -> (Vec<Vec<u8>>, Vec<riegeli_ffi::CppSkippedRegion>, u64) {
-    let mut reader = riegeli_ffi::RecordReader::with_options(data, &[], true, None)
-        .expect("cpp reader ok");
+    let mut reader =
+        riegeli_ffi::RecordReader::with_options(data, &[], true, None).expect("cpp reader ok");
     let mut out = Vec::new();
     while let Some(rec) = reader.read_record().expect("cpp read ok (recovery on)") {
         out.push(rec);
@@ -99,8 +99,8 @@ fn rust_read_projected(data: &[u8], proj: FieldProjection) -> Vec<Vec<u8>> {
 /// (Field::kExistenceOnly) at the bridge — see case D, which doubles as the
 /// validation of that mapping.
 fn cpp_read_projected(data: &[u8], paths: &[Vec<u32>]) -> Vec<Vec<u8>> {
-    let mut reader = riegeli_ffi::RecordReader::with_options(data, paths, false, None)
-        .expect("cpp reader ok");
+    let mut reader =
+        riegeli_ffi::RecordReader::with_options(data, paths, false, None).expect("cpp reader ok");
     let mut out = Vec::new();
     while let Some(rec) = reader.read_record().expect("cpp read ok") {
         out.push(rec);
@@ -389,7 +389,10 @@ fn f_cancel_consumes_region_both_sides() {
     });
     let mut rust_reader =
         RecordReader::new(Cursor::new(data.clone()), opts).expect("rust reader ok");
-    assert_eq!(rust_reader.read_record().unwrap().as_deref(), Some(&b"a"[..]));
+    assert_eq!(
+        rust_reader.read_record().unwrap().as_deref(),
+        Some(&b"a"[..])
+    );
     assert!(
         rust_reader.read_record().is_err(),
         "rust: cancelled read returns the original error"
@@ -399,13 +402,20 @@ fn f_cancel_consumes_region_both_sides() {
         Some(&b"c"[..]),
         "rust: region consumed — reading continues"
     );
-    assert_eq!(*count.borrow(), 1, "rust: callback fired once, never re-fired");
+    assert_eq!(
+        *count.borrow(),
+        1,
+        "rust: callback fired once, never re-fired"
+    );
 
     // C++: cancel → false/no-record once; next read continues to "c";
     // exactly one region collected.
     let mut cpp_reader =
         riegeli_ffi::RecordReader::with_options(&data, &[], true, Some(0)).expect("cpp reader ok");
-    assert_eq!(cpp_reader.read_record().unwrap().as_deref(), Some(&b"a"[..]));
+    assert_eq!(
+        cpp_reader.read_record().unwrap().as_deref(),
+        Some(&b"a"[..])
+    );
     assert_eq!(
         cpp_reader.read_record().unwrap(),
         None,
@@ -473,7 +483,9 @@ fn h2_metadata_corruption_recovery_parity() {
     let mut rust_reader =
         RecordReader::new(Cursor::new(data.clone()), opts).expect("rust reader ok");
     assert_eq!(
-        rust_reader.read_serialized_metadata().expect("rust metadata ok"),
+        rust_reader
+            .read_serialized_metadata()
+            .expect("rust metadata ok"),
         None,
         "rust: skipped region reads as absent metadata"
     );
@@ -562,9 +574,7 @@ fn g_generated_corruption_regions_match() {
         let (rust_recs, rust_regions, _) = rust_read_collecting(&data);
         let (cpp_recs, cpp_regions, _) = cpp_read_collecting(&data);
 
-        let ctx = format!(
-            "seed={seed:#x} case={case} transpose={transpose} offsets={offsets:?}"
-        );
+        let ctx = format!("seed={seed:#x} case={case} transpose={transpose} offsets={offsets:?}");
         assert_eq!(rust_recs, cpp_recs, "{ctx}: surviving records");
         assert_eq!(
             rust_regions.len(),
@@ -771,12 +781,10 @@ fn j2_aliased_field_mirrored_order_known_divergent() {
 fn k_initial_pos_and_seek_to_start_parity() {
     let data = rust_write(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
 
-    let mut rust_reader = RecordReader::new(
-        Cursor::new(data.clone()),
-        ReaderOptions::new(),
-    ).expect("rust reader ok");
-    let mut cpp_reader = riegeli_ffi::RecordReader::with_options(&data, &[], false, None)
-        .expect("cpp reader ok");
+    let mut rust_reader =
+        RecordReader::new(Cursor::new(data.clone()), ReaderOptions::new()).expect("rust reader ok");
+    let mut cpp_reader =
+        riegeli_ffi::RecordReader::with_options(&data, &[], false, None).expect("cpp reader ok");
 
     assert_eq!(
         rust_reader.pos().numeric(),

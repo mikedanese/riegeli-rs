@@ -75,31 +75,27 @@ impl<'a> Iterator for ProtoFieldIter<'a> {
             Some(v) => v,
             None => {
                 self.errored = true;
-                return Some(Err(crate::RiegeliError::MalformedData(format!(
-                    "invalid or truncated tag at offset {}",
-                    self.pos
-                ).into())));
+                return Some(Err(crate::RiegeliError::MalformedData(
+                    format!("invalid or truncated tag at offset {}", self.pos).into(),
+                )));
             }
         };
 
         let field_number = tag_field_number(tag);
         if field_number == 0 {
             self.errored = true;
-            return Some(Err(crate::RiegeliError::MalformedData(format!(
-                "field number 0 at offset {}",
-                self.pos
-            ).into())));
+            return Some(Err(crate::RiegeliError::MalformedData(
+                format!("field number 0 at offset {}", self.pos).into(),
+            )));
         }
 
         let wire_type = match tag_wire_type(tag) {
             Some(wt) => wt,
             None => {
                 self.errored = true;
-                return Some(Err(crate::RiegeliError::MalformedData(format!(
-                    "invalid wire type {} at offset {}",
-                    tag & 7,
-                    self.pos
-                ).into())));
+                return Some(Err(crate::RiegeliError::MalformedData(
+                    format!("invalid wire type {} at offset {}", tag & 7, self.pos).into(),
+                )));
             }
         };
 
@@ -113,19 +109,17 @@ impl<'a> Iterator for ProtoFieldIter<'a> {
                 }
                 None => {
                     self.errored = true;
-                    return Some(Err(crate::RiegeliError::MalformedData(format!(
-                        "invalid or truncated varint value at offset {}",
-                        self.pos
-                    ).into())));
+                    return Some(Err(crate::RiegeliError::MalformedData(
+                        format!("invalid or truncated varint value at offset {}", self.pos).into(),
+                    )));
                 }
             },
             WireType::Fixed32 => {
                 if self.pos + 4 > self.data.len() {
                     self.errored = true;
-                    return Some(Err(crate::RiegeliError::MalformedData(format!(
-                        "truncated fixed32 at offset {}",
-                        self.pos
-                    ).into())));
+                    return Some(Err(crate::RiegeliError::MalformedData(
+                        format!("truncated fixed32 at offset {}", self.pos).into(),
+                    )));
                 }
                 let v = u32::from_le_bytes([
                     self.data[self.pos],
@@ -139,10 +133,9 @@ impl<'a> Iterator for ProtoFieldIter<'a> {
             WireType::Fixed64 => {
                 if self.pos + 8 > self.data.len() {
                     self.errored = true;
-                    return Some(Err(crate::RiegeliError::MalformedData(format!(
-                        "truncated fixed64 at offset {}",
-                        self.pos
-                    ).into())));
+                    return Some(Err(crate::RiegeliError::MalformedData(
+                        format!("truncated fixed64 at offset {}", self.pos).into(),
+                    )));
                 }
                 let v = u64::from_le_bytes([
                     self.data[self.pos],
@@ -176,10 +169,9 @@ impl<'a> Iterator for ProtoFieldIter<'a> {
                 }
                 None => {
                     self.errored = true;
-                    return Some(Err(crate::RiegeliError::MalformedData(format!(
-                        "invalid or truncated length prefix at offset {}",
-                        self.pos
-                    ).into())));
+                    return Some(Err(crate::RiegeliError::MalformedData(
+                        format!("invalid or truncated length prefix at offset {}", self.pos).into(),
+                    )));
                 }
             },
             WireType::StartGroup => FieldValue::StartGroup,

@@ -131,9 +131,7 @@ impl FieldProjection {
                 .any(|f| f.path.is_empty() || f.path.contains(&field_number)),
         }
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -542,7 +542,10 @@ fn nested_path_projection_preserves_inner_values() {
         let (inner_tag, c3) = decode_u32(inner_bytes).expect("inner tag");
         assert_eq!(inner_tag >> 3, 2);
         let (value, _) = decode_u32(&inner_bytes[c3..]).expect("inner value");
-        assert_eq!(value, 777, "nested projection must carry the real value, not zeros");
+        assert_eq!(
+            value, 777,
+            "nested projection must carry the real value, not zeros"
+        );
     }
 }
 
@@ -602,7 +605,10 @@ fn existence_only_submessage_with_nested_content_and_sibling() {
     let mut expected = encode_u32((1 << 3) | 2);
     expected.push(0x00);
     expected.extend_from_slice(&encode_varint_field(2, 7));
-    assert_eq!(got[0], expected, "EO interior must not leak; sibling must survive");
+    assert_eq!(
+        got[0], expected,
+        "EO interior must not leak; sibling must survive"
+    );
 }
 
 /// Two sequential existence-only submessages: frame/level pairing must not
@@ -630,7 +636,10 @@ fn sequential_existence_only_submessages() {
     expected.push(0x00);
     expected.extend_from_slice(&encode_u32((2 << 3) | 2));
     expected.push(0x00);
-    assert_eq!(got[0], expected, "sequential EO submessages must pair independently");
+    assert_eq!(
+        got[0], expected,
+        "sequential EO submessages must pair independently"
+    );
 }
 
 /// C++ parity (include-type min-resolution): when a projection contains BOTH
@@ -674,7 +683,9 @@ fn probe_nested_path_through_group() {
     let record = encode_group(1, &content);
     let data = write_records(
         &[record.as_slice()],
-        WriterOptions::new().transpose(true).compression(CompressionType::None),
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
     );
     let proj = FieldProjection::new().add_field(Field::new(vec![1, 2]));
     let got = read_all(&data, ReaderOptions::new().field_projection(proj));
@@ -690,11 +701,16 @@ fn probe_group_included_fully() {
     let record = encode_group(1, &content);
     let data = write_records(
         &[record.as_slice()],
-        WriterOptions::new().transpose(true).compression(CompressionType::None),
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
     );
     let proj = FieldProjection::new().add_field(Field::new(vec![1]));
     let got = read_all(&data, ReaderOptions::new().field_projection(proj));
-    assert_eq!(got[0], record, "PROBE B: fully-included group keeps interior");
+    assert_eq!(
+        got[0], record,
+        "PROBE B: fully-included group keeps interior"
+    );
 }
 
 /// PROBE C: LD submessage included FULLY by path [1] — interior values must
@@ -706,11 +722,16 @@ fn probe_ld_submessage_included_fully() {
     let record = encode_string_field(1, &content);
     let data = write_records(
         &[record.as_slice()],
-        WriterOptions::new().transpose(true).compression(CompressionType::None),
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
     );
     let proj = FieldProjection::new().add_field(Field::new(vec![1]));
     let got = read_all(&data, ReaderOptions::new().field_projection(proj));
-    assert_eq!(got[0], record, "PROBE C: fully-included LD submessage keeps interior values");
+    assert_eq!(
+        got[0], record,
+        "PROBE C: fully-included LD submessage keeps interior values"
+    );
 }
 
 /// Buffer-consumption interleave (named documentation of the property the
@@ -731,7 +752,9 @@ fn eo_interior_buffer_interleave_preserves_sibling_values() {
 
     let data = write_records(
         &[record.as_slice()],
-        WriterOptions::new().transpose(true).compression(CompressionType::None),
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
     );
     let proj = FieldProjection::new()
         .add_field(Field::new(vec![1]).existence_only())
@@ -743,7 +766,8 @@ fn eo_interior_buffer_interleave_preserves_sibling_values() {
     expected.push(0x00);
     expected.extend_from_slice(&encode_string_field(2, b"SIBLING"));
     expected.extend_from_slice(&encode_varint_field(3, 777));
-    assert_eq!(got[0], expected, "sibling values exact after EO interior skip");
+    assert_eq!(
+        got[0], expected,
+        "sibling values exact after EO interior skip"
+    );
 }
-
-

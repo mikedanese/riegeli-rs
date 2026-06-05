@@ -1387,17 +1387,17 @@ impl TransposeChunkEncoder {
                     self.encoded_tags.push(idx);
                 }
                 None => {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "invalid wire type in tag {tag}"
-                    ).into()));
+                    return Err(RiegeliError::MalformedData(
+                        format!("invalid wire type in tag {tag}").into(),
+                    ));
                 }
             }
 
             // At the end of a submessage, pop the stack.
             while pos >= current_end && !message_stack.is_empty() {
-                let frame = message_stack.pop().ok_or_else(|| {
-                    RiegeliError::MalformedData("message stack empty".into())
-                })?;
+                let frame = message_stack
+                    .pop()
+                    .ok_or_else(|| RiegeliError::MalformedData("message stack empty".into()))?;
                 self.encoded_tags.push(frame.end_sub_tag_idx);
                 current_parent = frame.parent_message_id;
                 current_end = frame.parent_end_pos;

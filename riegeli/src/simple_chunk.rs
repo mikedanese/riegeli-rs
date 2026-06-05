@@ -247,9 +247,7 @@ impl SimpleChunkDecoder {
 
         // Must have at least 1 byte for compression type.
         if data.is_empty() {
-            return Err(RiegeliError::MalformedData(
-                "chunk data is empty".into(),
-            ));
+            return Err(RiegeliError::MalformedData("chunk data is empty".into()));
         }
 
         let compression_byte = data[0];
@@ -263,7 +261,12 @@ impl SimpleChunkDecoder {
                 // Brotli
                 #[cfg(feature = "brotli")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Brotli, decoded_data_size)
+                    decode_compressed(
+                        &data[1..],
+                        num_records,
+                        CompressionType::Brotli,
+                        decoded_data_size,
+                    )
                 }
                 #[cfg(not(feature = "brotli"))]
                 {
@@ -274,7 +277,12 @@ impl SimpleChunkDecoder {
                 // Zstd
                 #[cfg(feature = "zstd")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Zstd, decoded_data_size)
+                    decode_compressed(
+                        &data[1..],
+                        num_records,
+                        CompressionType::Zstd,
+                        decoded_data_size,
+                    )
                 }
                 #[cfg(not(feature = "zstd"))]
                 {
@@ -285,7 +293,12 @@ impl SimpleChunkDecoder {
                 // Snappy
                 #[cfg(feature = "snappy")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Snappy, decoded_data_size)
+                    decode_compressed(
+                        &data[1..],
+                        num_records,
+                        CompressionType::Snappy,
+                        decoded_data_size,
+                    )
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -324,9 +337,9 @@ fn decode_uncompressed(
     let sizes_start = varint_consumed;
     // checked_add: sizes_byte_len is attacker-claimed; a wrapping add here
     // would let the truncation check pass and the slice below panic.
-    let sizes_end = sizes_start.checked_add(sizes_byte_len).ok_or_else(|| {
-        RiegeliError::MalformedData("sizes section length overflows".into())
-    })?;
+    let sizes_end = sizes_start
+        .checked_add(sizes_byte_len)
+        .ok_or_else(|| RiegeliError::MalformedData("sizes section length overflows".into()))?;
     if sizes_end > payload.len() {
         return Err(RiegeliError::MalformedData(format!(
             "sizes section truncated: need {sizes_byte_len} bytes starting at offset {sizes_start}, \
@@ -352,9 +365,9 @@ fn decode_uncompressed(
     let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if pos >= sizes_data.len() {
-            return Err(RiegeliError::MalformedData(format!(
-                "unexpected end of sizes section at record {i}"
-            ).into()));
+            return Err(RiegeliError::MalformedData(
+                format!("unexpected end of sizes section at record {i}").into(),
+            ));
         }
         let (size, consumed) = decode_u64(&sizes_data[pos..]).map_err(|e| {
             RiegeliError::MalformedData(format!("varint decode error at record {i}: {e}").into())
@@ -378,14 +391,17 @@ fn decode_uncompressed(
         .iter()
         .try_fold(0usize, |acc, &sz| acc.checked_add(sz))
         .ok_or_else(|| RiegeliError::MalformedData("record sizes sum overflows".into()))?;
-    let values_end = values_start.checked_add(total_values_len).ok_or_else(|| {
-        RiegeliError::MalformedData("values section end overflows".into())
-    })?;
+    let values_end = values_start
+        .checked_add(total_values_len)
+        .ok_or_else(|| RiegeliError::MalformedData("values section end overflows".into()))?;
     if values_end > payload.len() {
-        return Err(RiegeliError::MalformedData(format!(
-            "values section truncated: need {total_values_len} bytes but only {} available",
-            payload.len() - values_start
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "values section truncated: need {total_values_len} bytes but only {} available",
+                payload.len() - values_start
+            )
+            .into(),
+        ));
     }
 
     let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
@@ -426,22 +442,26 @@ fn decode_compressed(
     let mut pos = 0usize;
 
     // Read varint64(sizes_blob_len) -- the LengthPrefixed total byte count
-    let (sizes_blob_len, consumed) = decode_u64(&payload[pos..])
-        .map_err(|e| RiegeliError::MalformedData(format!("failed to read sizes_blob_len: {e}").into()))?;
+    let (sizes_blob_len, consumed) = decode_u64(&payload[pos..]).map_err(|e| {
+        RiegeliError::MalformedData(format!("failed to read sizes_blob_len: {e}").into())
+    })?;
     pos += consumed;
     let sizes_blob_len = sizes_blob_len as usize;
 
     // checked_add: sizes_blob_len is attacker-claimed; a wrapping add here
     // would let the truncation check pass and the slice below panic.
-    let sizes_blob_end = pos.checked_add(sizes_blob_len).ok_or_else(|| {
-        RiegeliError::MalformedData("sizes blob length overflows".into())
-    })?;
+    let sizes_blob_end = pos
+        .checked_add(sizes_blob_len)
+        .ok_or_else(|| RiegeliError::MalformedData("sizes blob length overflows".into()))?;
     if sizes_blob_end > payload.len() {
-        return Err(RiegeliError::MalformedData(format!(
-            "sizes blob truncated: need {sizes_blob_len} bytes at offset {pos}, \
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "sizes blob truncated: need {sizes_blob_len} bytes at offset {pos}, \
              payload is {} bytes",
-            payload.len()
-        ).into()));
+                payload.len()
+            )
+            .into(),
+        ));
     }
 
     let sizes_blob = &payload[pos..sizes_blob_end];
@@ -460,19 +480,25 @@ fn decode_compressed(
     // cap the decompression at the claim.
     let max_sizes_len = (num_records as u64).saturating_mul(10);
     if uncompressed_sizes_len as u64 > max_sizes_len {
-        return Err(RiegeliError::MalformedData(format!(
-            "claimed sizes length {uncompressed_sizes_len} exceeds {max_sizes_len} \
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "claimed sizes length {uncompressed_sizes_len} exceeds {max_sizes_len} \
              ({num_records} records x 10-byte varints)"
-        ).into()));
+            )
+            .into(),
+        ));
     }
     let sizes_bytes =
         decompress_data_capped(compressed_sizes, compression, uncompressed_sizes_len as u64)?;
     if sizes_bytes.len() != uncompressed_sizes_len {
-        return Err(RiegeliError::MalformedData(format!(
-            "decompressed sizes length {} != expected {}",
-            sizes_bytes.len(),
-            uncompressed_sizes_len
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "decompressed sizes length {} != expected {}",
+                sizes_bytes.len(),
+                uncompressed_sizes_len
+            )
+            .into(),
+        ));
     }
 
     // Parse sizes section
@@ -488,9 +514,9 @@ fn decode_compressed(
     let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if spos >= sizes_bytes.len() {
-            return Err(RiegeliError::MalformedData(format!(
-                "unexpected end of decompressed sizes at record {i}"
-            ).into()));
+            return Err(RiegeliError::MalformedData(
+                format!("unexpected end of decompressed sizes at record {i}").into(),
+            ));
         }
         let (size, consumed) = decode_u64(&sizes_bytes[spos..]).map_err(|e| {
             RiegeliError::MalformedData(format!("varint decode in sizes at record {i}: {e}").into())
@@ -524,8 +550,7 @@ fn decode_compressed(
         ).into()));
     }
     let compressed_values = &values_blob[consumed3..];
-    let values_bytes =
-        decompress_data_capped(compressed_values, compression, decoded_data_size)?;
+    let values_bytes = decompress_data_capped(compressed_values, compression, decoded_data_size)?;
 
     // Verify total values length
     let total_values_len: usize = sizes
@@ -533,10 +558,13 @@ fn decode_compressed(
         .try_fold(0usize, |acc, &sz| acc.checked_add(sz))
         .ok_or_else(|| RiegeliError::MalformedData("record sizes sum overflows".into()))?;
     if total_values_len != values_bytes.len() {
-        return Err(RiegeliError::MalformedData(format!(
-            "values length mismatch: sizes sum {total_values_len} != decompressed values {}",
-            values_bytes.len()
-        ).into()));
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "values length mismatch: sizes sum {total_values_len} != decompressed values {}",
+                values_bytes.len()
+            )
+            .into(),
+        ));
     }
 
     let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(sizes.len());
