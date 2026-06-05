@@ -75,25 +75,6 @@ pub(crate) fn compress_brotli(
     Ok(output)
 }
 
-/// Decompress Brotli bytes.
-#[cfg(feature = "brotli")]
-pub(crate) fn decompress_brotli(
-    input: &[u8],
-    expected_len: usize,
-) -> Result<Vec<u8>, RiegeliError> {
-    use std::io::Read as _;
-    // expected_len is claimed by the (possibly hostile) input; read_to_end
-    // grows the buffer as real bytes arrive, so the reservation is purely
-    // an optimization — cap it rather than trusting the claim.
-    const MAX_DECOMPRESS_PREALLOC: usize = 1 << 24; // 16 MiB
-    let mut output = Vec::with_capacity(expected_len.min(MAX_DECOMPRESS_PREALLOC));
-    let mut reader = brotli::Decompressor::new(input, 4096);
-    reader
-        .read_to_end(&mut output)
-        .map_err(|e| RiegeliError::MalformedData(format!("brotli decompress error: {e}").into()))?;
-    Ok(output)
-}
-
 /// Compress bytes using Zstd.
 #[cfg(feature = "zstd")]
 pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u8>, RiegeliError> {
@@ -121,13 +102,6 @@ pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u
             .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}").into()))?
     };
     Ok(compressed)
-}
-
-/// Decompress Zstd bytes.
-#[cfg(feature = "zstd")]
-pub(crate) fn decompress_zstd(input: &[u8]) -> Result<Vec<u8>, RiegeliError> {
-    zstd::decode_all(input)
-        .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}").into()))
 }
 
 /// Compress bytes using Snappy.
@@ -358,70 +332,6 @@ pub(crate) fn decompress_data_capped(
             #[cfg(not(feature = "snappy"))]
             {
                 Err(RiegeliError::UnsupportedCompression(CompressionType::Snappy as u8))
-            }
-        }
-    }
-}
-
-/// Decompress raw compressed bytes (no varint prefix).
-///
-/// For `CompressionType::None`, the data is returned as-is (copied).
-pub(crate) fn decompress_raw(
-    data: &[u8],
-    compression: CompressionType,
-) -> Result<Vec<u8>, RiegeliError> {
-    match compression {
-        CompressionType::None => Ok(data.to_vec()),
-        _ => decompress_data(data, compression),
-    }
-}
-
-/// Decompress data using the specified compression type.
-///
-/// This is the shared decompression dispatch used by both the simple and transpose
-/// chunk decoders. For `CompressionType::None`, the data is returned as-is (copied).
-pub(crate) fn decompress_data(
-    data: &[u8],
-    compression: CompressionType,
-) -> Result<Vec<u8>, RiegeliError> {
-    match compression {
-        CompressionType::None => Ok(data.to_vec()),
-        CompressionType::Brotli => {
-            #[cfg(feature = "brotli")]
-            {
-                // Saturating: the hint is advisory (the prealloc is capped
-                // downstream); an unchecked * 4 overflows 32-bit usize.
-                decompress_brotli(data, data.len().saturating_mul(4))
-            }
-            #[cfg(not(feature = "brotli"))]
-            {
-                Err(RiegeliError::UnsupportedCompression(
-                    CompressionType::Brotli as u8,
-                ))
-            }
-        }
-        CompressionType::Zstd => {
-            #[cfg(feature = "zstd")]
-            {
-                decompress_zstd(data)
-            }
-            #[cfg(not(feature = "zstd"))]
-            {
-                Err(RiegeliError::UnsupportedCompression(
-                    CompressionType::Zstd as u8,
-                ))
-            }
-        }
-        CompressionType::Snappy => {
-            #[cfg(feature = "snappy")]
-            {
-                decompress_snappy(data)
-            }
-            #[cfg(not(feature = "snappy"))]
-            {
-                Err(RiegeliError::UnsupportedCompression(
-                    CompressionType::Snappy as u8,
-                ))
             }
         }
     }
