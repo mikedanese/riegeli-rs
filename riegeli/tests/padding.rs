@@ -135,6 +135,36 @@ fn concatenated_padded_files_readable() {
 // Criterion 7.4: TryFrom<u8> for CompressionType (public API)
 // -----------------------------------------------------------------------
 
+/// Small alignments (below the 40-byte chunk-header size) must still land
+/// exactly on an alignment multiple: the old single-step fallback saturated
+/// the padding data size to zero and overshot the boundary.
+#[test]
+fn small_alignment_padding_lands_on_multiples() {
+    for alignment in [8u64, 15, 16, 24, 32, 48, 64] {
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = RecordWriter::new(
+                &mut buf,
+                WriterOptions::new().final_padding(alignment),
+            )
+            .expect("writer new ok");
+            w.write_record(b"x").expect("write ok");
+            w.close().expect("close ok");
+        }
+        let data = buf.into_inner();
+        assert_eq!(
+            data.len() as u64 % alignment,
+            0,
+            "alignment {alignment}: file len {} not a multiple",
+            data.len()
+        );
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"x"[..]));
+        assert_eq!(reader.read_record().expect("read ok"), None);
+    }
+}
+
 #[test]
 fn compression_type_try_from_unknown_returns_err() {
     let unknown_bytes: &[u8] = &[0x01, 0x7f, 0xfe, 0xff, b'x', b'r'];
