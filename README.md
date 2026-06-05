@@ -35,14 +35,6 @@ while let Some(record) = reader.read_record().unwrap() {
 }
 ```
 
-## Build requirements
-
-This crate generates Rust code from `.proto` files at build time using
-`protobuf-codegen`, which requires a compatible `protoc` binary on your `PATH`.
-Download the latest release from the
-[protobuf releases page](https://github.com/protocolbuffers/protobuf/releases)
-(look for `protoc-<version>-<platform>.zip`).
-
 ## Benchmarks
 
 See [`riegeli/benches/README.md`](riegeli/benches/README.md) for the full
