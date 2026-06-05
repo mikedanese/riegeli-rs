@@ -949,10 +949,6 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             let data_size = ch.data_size();
-            let chunk_type = match ch.chunk_type() {
-                Ok(ct) => ct,
-                Err(_) => continue, // unknown chunk type, skip for forward compat
-            };
             let num_records = ch.num_records();
 
             // Compute where the chunk data ends in the file (accounting for block headers).
@@ -972,6 +968,19 @@ impl<R: Read + Seek> RecordReader<R> {
 
             // Update state for the next chunk.
             self.next_chunk_file_pos = data_file_end;
+
+            // Resolve the chunk type only after next_chunk_file_pos has been
+            // advanced: an unknown type must skip the whole chunk (forward
+            // compatibility), and skipping requires the loop to make progress.
+            //
+            // Matching the C++ ChunkDecoder: an unknown chunk type is ignored
+            // only when it carries no records; skipping a chunk with records
+            // would lose data silently, so that case is an error.
+            let chunk_type = match ch.chunk_type() {
+                Ok(ct) => ct,
+                Err(_) if num_records == 0 => continue,
+                Err(e) => return Err(e),
+            };
 
             match chunk_type {
                 ChunkType::Simple => {
@@ -1625,5 +1634,85 @@ mod tests {
         for (i, (got, expected)) in got.iter().zip(records.iter()).enumerate() {
             assert_eq!(got.as_slice(), *expected, "brotli record {i} mismatch");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Unknown chunk types must be skipped, not re-read forever
+    // -------------------------------------------------------------------------
+
+    /// A well-formed 40-byte chunk header whose type byte is not any known
+    /// `ChunkType` discriminant, with zero data bytes. Both hashes are valid,
+    /// so only the type is unrecognized — the forward-compatibility case.
+    fn unknown_type_chunk() -> Vec<u8> {
+        unknown_type_chunk_with_records(0)
+    }
+
+    fn unknown_type_chunk_with_records(num_records: u64) -> Vec<u8> {
+        let data_size: u64 = 0;
+        let data_hash = crate::hash::highway_hash_64(&[]);
+        let chunk_type_and_num_records: u64 = (num_records << 8) | b'z' as u64; // 'z' is not a known type
+        let decoded_data_size: u64 = 0;
+
+        let mut body = [0u8; 32];
+        body[0..8].copy_from_slice(&data_size.to_le_bytes());
+        body[8..16].copy_from_slice(&data_hash.to_le_bytes());
+        body[16..24].copy_from_slice(&chunk_type_and_num_records.to_le_bytes());
+        body[24..32].copy_from_slice(&decoded_data_size.to_le_bytes());
+        let header_hash = crate::hash::highway_hash_64(&body);
+
+        let mut out = Vec::with_capacity(40);
+        out.extend_from_slice(&header_hash.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn unknown_chunk_type_at_end_is_skipped() {
+        let mut data = write_records(&[b"only"], WriterOptions::new());
+        data.extend_from_slice(&unknown_type_chunk());
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"only"[..]));
+        // Before the fix this call never returned: load_next_chunk() hit the
+        // unknown chunk and retried the same file position forever.
+        assert_eq!(reader.read_record().expect("read ok"), None);
+    }
+
+    #[test]
+    fn unknown_chunk_type_mid_stream_is_skipped() {
+        // Build two single-record files and splice an unknown chunk between
+        // the first file and the second file's record chunk. Layout of each
+        // writer output: block header (24) | signature chunk (40) | record chunk.
+        let first = write_records(&[b"first"], WriterOptions::new());
+        let second = write_records(&[b"second"], WriterOptions::new());
+
+        let mut data = first;
+        data.extend_from_slice(&unknown_type_chunk());
+        data.extend_from_slice(&second[64..]); // strip block header + signature chunk
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"second"[..]));
+        assert_eq!(reader.read_record().expect("read ok"), None);
+    }
+
+    /// Matching the C++ ChunkDecoder: an unknown chunk type that claims to
+    /// carry records cannot be skipped — its records would be silently lost —
+    /// so it is an error rather than a forward-compatibility skip.
+    #[test]
+    fn unknown_chunk_type_with_records_is_an_error() {
+        let mut data = write_records(&[b"only"], WriterOptions::new());
+        data.extend_from_slice(&unknown_type_chunk_with_records(3));
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"only"[..]));
+        let err = reader.read_record().expect_err("unknown chunk with records must error");
+        assert!(
+            err.to_string().contains("unknown chunk type") || err.to_string().contains("chunk type"),
+            "unexpected error: {err}"
+        );
     }
 }
