@@ -135,31 +135,26 @@ impl<R: Read + Seek> RecordReader<R> {
             ));
         }
 
-        // Read and validate the signature chunk header at offset 24.
+        // Validate the signature chunk at offset 24 by exact comparison: the
+        // riegeli file signature is a fixed 40-byte constant (empty data,
+        // zero records). Comparing bytes — rather than checking the hash and
+        // type and then trusting the header's claimed sizes — does no
+        // arithmetic on attacker-controlled values at all: a hash-valid
+        // signature header claiming a huge data_size used to overflow the
+        // position sum in debug and seek backward through the i64 cast in
+        // release. This matches the C++ reader, which verifies the
+        // signature bytes.
         let mut ch_bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
         reader.read_exact(&mut ch_bytes)?;
-        let sig_chunk_hdr = ChunkHeader::from_bytes(ch_bytes);
-        if !sig_chunk_hdr.is_header_valid() {
+        let canonical = ChunkHeader::from_parts(&[], ChunkType::FileSignature, 0, 0).to_bytes();
+        if ch_bytes != canonical {
             return Err(RiegeliError::MalformedData(
-                "invalid chunk header hash for signature chunk at offset 24".into(),
+                "invalid file signature chunk at offset 24".into(),
             ));
         }
-        let sig_chunk_type = sig_chunk_hdr.chunk_type()?;
-        if sig_chunk_type != ChunkType::FileSignature {
-            return Err(RiegeliError::MalformedData(format!(
-                "expected FileSignature chunk at offset 24, got chunk_type={:#04x}",
-                sig_chunk_type as u8
-            ).into()));
-        }
 
-        // Skip the signature chunk's data (should be 0 bytes, but be safe).
-        let sig_data_size = sig_chunk_hdr.data_size();
-        if sig_data_size > 0 {
-            reader.seek(SeekFrom::Current(sig_data_size as i64))?;
-        }
-
-        // File position after the signature chunk: 24 (BH) + 40 (CH) + data_size = 64.
-        let next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE + sig_data_size;
+        // File position after the signature chunk: 24 (BH) + 40 (CH) + 0 = 64.
+        let next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE;
 
         // Per spec criterion 6.3: pos() at start returns { chunk_begin: 24, record_index: 0 }.
         let initial_pos = RecordPosition::new(BLOCK_HEADER_SIZE, 0);
@@ -1833,6 +1828,48 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The signature chunk is a fixed constant; a hash-valid signature
+    /// header with nonzero claimed sizes must be rejected by the exact
+    /// byte comparison — trusting its data_size used to overflow the
+    /// position arithmetic (debug panic) or seek backward through the
+    /// i64 cast (release).
+    #[test]
+    fn hostile_signature_chunk_claims_are_rejected() {
+        fn hostile_signature(data_size: u64) -> Vec<u8> {
+            let data_hash = crate::hash::highway_hash_64(&[]);
+            let chunk_type_and_num_records: u64 = ChunkType::FileSignature as u8 as u64;
+            let decoded_data_size: u64 = 0;
+            let mut body = [0u8; 32];
+            body[0..8].copy_from_slice(&data_size.to_le_bytes());
+            body[8..16].copy_from_slice(&data_hash.to_le_bytes());
+            body[16..24].copy_from_slice(&chunk_type_and_num_records.to_le_bytes());
+            body[24..32].copy_from_slice(&decoded_data_size.to_le_bytes());
+            let header_hash = crate::hash::highway_hash_64(&body);
+            let mut out = Vec::with_capacity(40);
+            out.extend_from_slice(&header_hash.to_le_bytes());
+            out.extend_from_slice(&body);
+            out
+        }
+
+        let valid = write_records(&[b"x"], WriterOptions::new());
+        for data_size in [u64::MAX, 1000u64] {
+            let mut data = valid[..24].to_vec(); // keep the valid block header
+            data.extend_from_slice(&hostile_signature(data_size));
+
+            let err = RecordReader::new(Cursor::new(data), ReaderOptions::new())
+                .err()
+                .expect("hostile signature chunk must be rejected");
+            assert!(
+                err.to_string().contains("file signature"),
+                "data_size={data_size}: unexpected error: {err}"
+            );
+        }
+
+        // Sanity: a writer-produced file still opens (its signature IS the
+        // canonical constant).
+        RecordReader::new(Cursor::new(valid), ReaderOptions::new()).expect("valid file opens");
     }
 
     /// A reader over a file that grows between reads is supported: hitting
