@@ -895,7 +895,17 @@ impl<R: Read + Seek> RecordReader<R> {
                         header: ch,
                         data: chunk_data,
                     };
-                    let decoder = SimpleChunkDecoder::new(chunk)?;
+                    // Persistence: construction failures (malformed chunk
+                    // interior behind valid hashes) must rewind like the
+                    // hash-mismatch and unknown-type paths do — a bare retry
+                    // must re-hit this chunk, not silently skip its records.
+                    let decoder = match SimpleChunkDecoder::new(chunk) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            self.next_chunk_file_pos = chunk_begin;
+                            return Err(e);
+                        }
+                    };
                     self.current_chunk_begin = chunk_begin;
                     self.current_record_index = 0;
                     self.pos = RecordPosition::new(chunk_begin, 0);
@@ -908,10 +918,17 @@ impl<R: Read + Seek> RecordReader<R> {
                         header: ch,
                         data: chunk_data,
                     };
-                    let decoder = TransposeChunkDecoder::new_with_projection(
+                    // Same persistence convention as the Simple arm above.
+                    let decoder = match TransposeChunkDecoder::new_with_projection(
                         chunk,
                         self.field_projection.as_ref(),
-                    )?;
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            self.next_chunk_file_pos = chunk_begin;
+                            return Err(e);
+                        }
+                    };
                     self.current_chunk_begin = chunk_begin;
                     self.current_record_index = 0;
                     self.pos = RecordPosition::new(chunk_begin, 0);
@@ -1101,7 +1118,11 @@ impl<R: Read + Seek> RecordReader<R> {
 
         self.current_chunk_begin = chunk_begin;
         self.current_record_index = 0;
-        self.next_chunk_file_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
+        // Advance only on success: if decoder construction below fails, the
+        // position stays at this chunk so the error is persistent on retry
+        // (same convention as load_next_chunk).
+        let chunk_end_pos =
+            crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
 
         match ch.chunk_type() {
             Ok(ChunkType::Simple) => {
@@ -1110,6 +1131,7 @@ impl<R: Read + Seek> RecordReader<R> {
                     data: chunk_data,
                 };
                 let decoder = SimpleChunkDecoder::new(chunk)?;
+                self.next_chunk_file_pos = chunk_end_pos;
                 Ok(Some(ActiveDecoder::Simple(decoder)))
             }
             Ok(ChunkType::Transposed) => {
@@ -1121,9 +1143,13 @@ impl<R: Read + Seek> RecordReader<R> {
                     chunk,
                     self.field_projection.as_ref(),
                 )?;
+                self.next_chunk_file_pos = chunk_end_pos;
                 Ok(Some(ActiveDecoder::Transposed(decoder)))
             }
-            _ => Ok(None),
+            _ => {
+                self.next_chunk_file_pos = chunk_end_pos;
+                Ok(None)
+            }
         }
     }
 
@@ -1824,6 +1850,58 @@ mod tests {
                 ),
                 Ok(rec) => panic!(
                     "attempt {attempt}: error was not persistent; got {:?}",
+                    rec.as_deref().map(|r| String::from_utf8_lossy(r).into_owned())
+                ),
+            }
+        }
+    }
+
+    /// Decoder-construction failures (malformed chunk interior behind valid
+    /// hashes) must be persistent like every other read error: a bare retry
+    /// must re-hit the same chunk, not silently resume at the next one.
+    /// Layout: [chunk "first"][valid-hash chunk with hostile interior]
+    /// [chunk "second"].
+    #[test]
+    fn decoder_construction_error_is_persistent() {
+        // A Simple chunk whose hashes are valid but whose single data byte
+        // is an unknown compression type — SimpleChunkDecoder::new fails.
+        fn hostile_interior_chunk() -> Vec<u8> {
+            let data = [0xFFu8]; // unknown compression byte
+            let data_hash = crate::hash::highway_hash_64(&data);
+            let chunk_type_and_num_records: u64 = (1u64 << 8) | ChunkType::Simple as u8 as u64;
+            let decoded_data_size: u64 = 0;
+            let mut body = [0u8; 32];
+            body[0..8].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            body[8..16].copy_from_slice(&data_hash.to_le_bytes());
+            body[16..24].copy_from_slice(&chunk_type_and_num_records.to_le_bytes());
+            body[24..32].copy_from_slice(&decoded_data_size.to_le_bytes());
+            let header_hash = crate::hash::highway_hash_64(&body);
+            let mut out = Vec::with_capacity(41);
+            out.extend_from_slice(&header_hash.to_le_bytes());
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&data);
+            out
+        }
+
+        let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        assert_eq!(&two[..one.len()], &one[..]);
+        let second_chunk = &two[one.len()..];
+
+        let mut data = one.clone();
+        data.extend_from_slice(&hostile_interior_chunk());
+        data.extend_from_slice(second_chunk);
+        assert!(data.len() < 65536);
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+        assert!(reader.read_record().is_err(), "construction failure must error");
+        for attempt in 0..3 {
+            match reader.read_record() {
+                Err(_) => {}
+                Ok(rec) => panic!(
+                    "attempt {attempt}: construction error was not persistent; got {:?}",
                     rec.as_deref().map(|r| String::from_utf8_lossy(r).into_owned())
                 ),
             }
