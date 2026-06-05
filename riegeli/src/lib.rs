@@ -20,6 +20,7 @@ pub(crate) mod constants;
 pub(crate) mod hash;
 pub mod proto;
 pub(crate) mod simple_chunk;
+pub(crate) mod skipped_region;
 pub(crate) mod transpose;
 pub mod varint;
 
@@ -68,5 +69,6 @@ pub use error::RiegeliError;
 pub use field_projection::{Field, FieldProjection};
 pub use proto_generated::RecordsMetadata;
 pub use record_position::RecordPosition;
+pub use skipped_region::SkippedRegion;
 pub use record_reader::{ReaderOptions, RecordReader};
 pub use record_writer::{RecordWriter, WriterOptions};

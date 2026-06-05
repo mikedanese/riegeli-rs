@@ -104,8 +104,9 @@ fn corrupt_block_header_with_recovery() {
     let rc = Rc::clone(&recovered);
 
     let cursor = Cursor::new(data.clone());
-    let opts = ReaderOptions::new().recovery(move |pos, _| {
-        rc.borrow_mut().push(pos);
+    let opts = ReaderOptions::new().recovery(move |region| {
+        rc.borrow_mut().push(region.begin());
+        true
     });
     let mut reader = RecordReader::new(cursor, opts).expect("reader new");
 
