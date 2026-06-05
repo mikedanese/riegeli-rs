@@ -206,8 +206,11 @@ impl<R: Read + Seek> RecordReader<R> {
         // File position after the signature chunk: 24 (BH) + 40 (CH) + 0 = 64.
         let next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE;
 
-        // Per spec criterion 6.3: pos() at start returns { chunk_begin: 24, record_index: 0 }.
-        let initial_pos = RecordPosition::new(BLOCK_HEADER_SIZE, 0);
+        // Initial position matches the C++ reference: numeric 0 (the
+        // beginning of the file), not the first chunk's canonical address
+        // 24 — verified by the differential harness (an earlier criterion
+        // documented 24; the reference disagrees and wins).
+        let initial_pos = RecordPosition::new(0, 0);
 
         Ok(Self {
             reader,
@@ -745,8 +748,8 @@ impl<R: Read + Seek> RecordReader<R> {
     pub fn seek_back(&mut self) -> Result<bool, RiegeliError> {
         // The initial position: chunk_begin=24 (BLOCK_HEADER_SIZE), record_index=0.
         // If last_pos is the initial position, there is no previous record.
-        let initial_chunk_begin = BLOCK_HEADER_SIZE; // = 24
-        if self.last_pos.chunk_begin == initial_chunk_begin && self.last_pos.record_index == 0 {
+        // The initial position (no record read yet) is numeric 0.
+        if self.last_pos.chunk_begin == 0 && self.last_pos.record_index == 0 {
             return Ok(false);
         }
 
@@ -1500,7 +1503,10 @@ mod tests {
         let reader = RecordReader::new(cursor, ReaderOptions::new()).expect("reader new ok");
 
         let pos = reader.pos();
-        assert_eq!(pos.chunk_begin, 24, "chunk_begin should be 24");
+        // Matches the C++ reference: initial position is numeric 0 (the
+        // earlier criterion said 24; the differential harness showed the
+        // reference returns 0 and the reference wins).
+        assert_eq!(pos.numeric(), 0, "initial position is numeric 0");
         assert_eq!(pos.record_index, 0, "record_index should be 0");
     }
 

@@ -762,3 +762,34 @@ fn j2_aliased_field_mirrored_order_known_divergent() {
         "the reference's cached exclusion drops the included occurrence"
     );
 }
+
+/// MATCH: initial pos() and seek-to-start parity. The Rust reader
+/// previously reported the first chunk's canonical address (24) as its
+/// initial position; the reference reports numeric 0 — fixed to match,
+/// and pinned here.
+#[test]
+fn k_initial_pos_and_seek_to_start_parity() {
+    let data = rust_write(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+
+    let mut rust_reader = RecordReader::new(
+        Cursor::new(data.clone()),
+        ReaderOptions::new(),
+    ).expect("rust reader ok");
+    let mut cpp_reader = riegeli_ffi::RecordReader::with_options(&data, &[], false, None)
+        .expect("cpp reader ok");
+
+    assert_eq!(
+        rust_reader.pos().numeric(),
+        cpp_reader.pos_numeric(),
+        "initial numeric positions agree"
+    );
+    assert_eq!(rust_reader.pos().numeric(), 0);
+
+    rust_reader.seek_numeric(0).expect("rust seek 0");
+    assert!(cpp_reader.seek_numeric(0), "cpp seek 0");
+    assert_eq!(
+        rust_reader.read_record().unwrap(),
+        cpp_reader.read_record().unwrap(),
+        "first record after seek-to-0 agrees"
+    );
+}

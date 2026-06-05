@@ -277,8 +277,8 @@ fn pos_tracks_correctly_through_reads() {
     let cursor = Cursor::new(data);
     let mut reader = RecordReader::new(cursor, ReaderOptions::new()).expect("reader new");
 
-    // pos() at start should be {24, 0}
-    assert_eq!(reader.pos().chunk_begin, 24);
+    // pos() at start is numeric 0, matching the C++ reference.
+    assert_eq!(reader.pos().numeric(), 0);
     assert_eq!(reader.pos().record_index, 0);
 
     // After reading first record, pos should advance
