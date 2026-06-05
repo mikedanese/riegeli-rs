@@ -832,14 +832,16 @@ impl<R: Read + Seek> RecordReader<R> {
 
             // Read the chunk header, skipping any leading block header and any
             // block header interleaved within the 40-byte header span.
-            let (ch, data_start, data_begin) = match self.read_chunk_header_at(pos)? {
+            // `chunk_begin` is the position of the header's first byte — the
+            // chunk's canonical address.
+            let (ch, chunk_begin, data_begin) = match self.read_chunk_header_at(pos)? {
                 Some(v) => v,
                 None => return Ok(false), // EOF
             };
 
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
-                    "invalid chunk header hash at file position {data_start}"
+                    "invalid chunk header hash at file position {chunk_begin}"
                 ).into()));
             }
 
@@ -847,17 +849,18 @@ impl<R: Read + Seek> RecordReader<R> {
             let num_records = ch.num_records();
 
             // Compute where the chunk data ends in the file (accounting for block headers).
-            let data_file_end = crate::block_arithmetic::chunk_end(data_start, data_size, num_records);
+            let data_file_end = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
 
             // Read the chunk data (skipping block headers).
             let chunk_data = self.read_chunk_data(data_begin, data_size)?;
 
             // Validate data hash.
             if !ch.is_data_valid(&chunk_data) {
-                // Update next_chunk_file_pos so recovery can skip forward correctly.
-                self.next_chunk_file_pos = data_start;
+                // Leave next_chunk_file_pos at the chunk start so the error
+                // persists on retry and recovery scans from the right place.
+                self.next_chunk_file_pos = chunk_begin;
                 return Err(RiegeliError::MalformedData(format!(
-                    "chunk data hash mismatch at file position {data_start}"
+                    "chunk data hash mismatch at file position {chunk_begin}"
                 ).into()));
             }
 
@@ -874,7 +877,14 @@ impl<R: Read + Seek> RecordReader<R> {
             let chunk_type = match ch.chunk_type() {
                 Ok(ct) => ct,
                 Err(_) if num_records == 0 => continue,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // Mirror the hash-mismatch convention: reset to the chunk
+                    // start so the error is persistent — a bare retry must
+                    // re-hit this chunk, not silently resume past its
+                    // (dropped) records at the next chunk.
+                    self.next_chunk_file_pos = chunk_begin;
+                    return Err(e);
+                }
             };
 
             match chunk_type {
@@ -884,9 +894,9 @@ impl<R: Read + Seek> RecordReader<R> {
                         data: chunk_data,
                     };
                     let decoder = SimpleChunkDecoder::new(chunk)?;
-                    self.current_chunk_begin = data_start;
+                    self.current_chunk_begin = chunk_begin;
                     self.current_record_index = 0;
-                    self.pos = RecordPosition::new(data_start, 0);
+                    self.pos = RecordPosition::new(chunk_begin, 0);
                     self.current_decoder = Some(ActiveDecoder::Simple(decoder));
                     let _ = num_records;
                     return Ok(true);
@@ -900,9 +910,9 @@ impl<R: Read + Seek> RecordReader<R> {
                         chunk,
                         self.field_projection.as_ref(),
                     )?;
-                    self.current_chunk_begin = data_start;
+                    self.current_chunk_begin = chunk_begin;
                     self.current_record_index = 0;
-                    self.pos = RecordPosition::new(data_start, 0);
+                    self.pos = RecordPosition::new(chunk_begin, 0);
                     self.current_decoder = Some(ActiveDecoder::Transposed(decoder));
                     let _ = num_records;
                     return Ok(true);
@@ -1022,14 +1032,14 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Returns `Ok(None)` at EOF.
     fn load_chunk_at(&mut self, file_pos: u64) -> Result<Option<ActiveDecoder>, RiegeliError> {
         // Read the chunk header (skipping leading and interleaved block headers).
-        let (ch, data_start, data_begin) = match self.read_chunk_header_at(file_pos)? {
+        let (ch, chunk_begin, data_begin) = match self.read_chunk_header_at(file_pos)? {
             Some(v) => v,
             None => return Ok(None), // EOF
         };
 
         if !ch.is_header_valid() {
             return Err(RiegeliError::MalformedData(format!(
-                "invalid chunk header hash at file position {data_start}"
+                "invalid chunk header hash at file position {chunk_begin}"
             ).into()));
         }
 
@@ -1038,13 +1048,13 @@ impl<R: Read + Seek> RecordReader<R> {
 
         if !ch.is_data_valid(&chunk_data) {
             return Err(RiegeliError::MalformedData(format!(
-                "chunk data hash mismatch at file position {data_start}"
+                "chunk data hash mismatch at file position {chunk_begin}"
             ).into()));
         }
 
-        self.current_chunk_begin = data_start;
+        self.current_chunk_begin = chunk_begin;
         self.current_record_index = 0;
-        self.next_chunk_file_pos = crate::block_arithmetic::chunk_end(data_start, data_size, ch.num_records());
+        self.next_chunk_file_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
 
         match ch.chunk_type() {
             Ok(ChunkType::Simple) => {
@@ -1675,5 +1685,51 @@ mod tests {
             err.to_string().contains("unknown chunk type") || err.to_string().contains("chunk type"),
             "unexpected error: {err}"
         );
+    }
+
+    /// The unknown-chunk-with-records error must be persistent: a caller
+    /// that ignores the error and calls `read_record` again must hit the
+    /// same error, not silently resume at the next chunk — that would skip
+    /// the unknown chunk's claimed records after all, defeating the guard.
+    /// Layout: [chunk "first"] [unknown type, num_records=3] [chunk "second"].
+    #[test]
+    fn unknown_chunk_type_error_is_persistent_and_does_not_skip_to_next_chunk() {
+        // chunk_size(1) forces one chunk per record, so the two-record file
+        // is [block hdr][signature][chunk "first"][chunk "second"] and the
+        // one-record file is the same minus the last chunk. Their shared
+        // prefix lets us splice an unknown chunk between the two chunks;
+        // chunks are position-independent below the first block boundary.
+        let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        assert_eq!(&two[..one.len()], &one[..], "one-record file must be a prefix");
+        let second_chunk = &two[one.len()..];
+
+        let mut data = one.clone();
+        data.extend_from_slice(&unknown_type_chunk_with_records(3));
+        data.extend_from_slice(second_chunk);
+        assert!(data.len() < 65536, "test assumes no block boundary is crossed");
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+
+        // First attempt errors on the unknown chunk.
+        let err = reader.read_record().expect_err("unknown chunk with records must error");
+        assert!(err.to_string().contains("chunk type"), "unexpected error: {err}");
+
+        // Retries must keep erroring on the same chunk; "second" must never
+        // surface past the guard.
+        for attempt in 0..3 {
+            match reader.read_record() {
+                Err(e) => assert!(
+                    e.to_string().contains("chunk type"),
+                    "attempt {attempt}: unexpected error: {e}"
+                ),
+                Ok(rec) => panic!(
+                    "attempt {attempt}: error was not persistent; got {:?}",
+                    rec.as_deref().map(|r| String::from_utf8_lossy(r).into_owned())
+                ),
+            }
+        }
     }
 }
