@@ -68,6 +68,21 @@ fn deps() -> Vec<Dep> {
     ]
 }
 
+/// Rewrite a dependency URL against `RIEGELI_FFI_MIRROR_BASE`, if set.
+///
+/// The value replaces the `https://github.com` prefix — e.g. a corporate
+/// read-through mirror like `https://mirror.example.com/github`.
+/// Checksums are unchanged: the BLAKE2b-512 pins verify content regardless
+/// of which mirror served it, so this shifts availability, not trust.
+fn apply_mirror(url: &str) -> String {
+    match env::var("RIEGELI_FFI_MIRROR_BASE") {
+        Ok(base) if !base.is_empty() => {
+            url.replacen("https://github.com", base.trim_end_matches('/'), 1)
+        }
+        _ => url.to_string(),
+    }
+}
+
 fn download_and_extract(name: &str, url: &str, expected_hash: &str, deps_dir: &Path) -> PathBuf {
     let marker = deps_dir.join(format!(".{name}.done"));
     if marker.exists() {
@@ -82,18 +97,27 @@ fn download_and_extract(name: &str, url: &str, expected_hash: &str, deps_dir: &P
         }
     }
 
-    eprintln!("Downloading {name} from {url}...");
-    let resp = ureq::get(url)
-        .call()
-        .unwrap_or_else(|e| panic!("Failed to download {name}: {e}"));
-    let mut reader = resp.into_reader();
-
-    // Download to a temp file so we can hash before extracting
+    // A pre-populated `{name}.tar.gz` in the deps dir is used instead of the
+    // network (hash verification below applies either way), so fully offline
+    // builds work from a directory of fetched tarballs.
     let tarball = deps_dir.join(format!("{name}.tar.gz"));
-    let mut buf = Vec::new();
-    reader
-        .read_to_end(&mut buf)
-        .unwrap_or_else(|e| panic!("Failed to read {name} download: {e}"));
+    let prepopulated = tarball.exists();
+    let buf = if prepopulated {
+        eprintln!("Using pre-populated {name} tarball at {}...", tarball.display());
+        fs::read(&tarball).unwrap_or_else(|e| panic!("Failed to read {name} tarball: {e}"))
+    } else {
+        let url = apply_mirror(url);
+        eprintln!("Downloading {name} from {url}...");
+        let resp = ureq::get(&url)
+            .call()
+            .unwrap_or_else(|e| panic!("Failed to download {name}: {e}"));
+        let mut reader = resp.into_reader();
+        let mut buf = Vec::new();
+        reader
+            .read_to_end(&mut buf)
+            .unwrap_or_else(|e| panic!("Failed to read {name} download: {e}"));
+        buf
+    };
 
     // BLAKE2b-512 verification
     let mut hasher = Blake2b512::new();
@@ -110,8 +134,6 @@ fn download_and_extract(name: &str, url: &str, expected_hash: &str, deps_dir: &P
         );
     }
 
-    fs::write(&tarball, &buf).unwrap();
-
     // Extract
     let decoder = GzDecoder::new(&buf[..]);
     let mut archive = Archive::new(decoder);
@@ -119,7 +141,10 @@ fn download_and_extract(name: &str, url: &str, expected_hash: &str, deps_dir: &P
         .unpack(deps_dir)
         .unwrap_or_else(|e| panic!("Failed to extract {name}: {e}"));
 
-    fs::remove_file(&tarball).ok();
+    if !prepopulated {
+        // (Nothing was written to disk for the network path; keeping the
+        // deps dir tarball-free there preserves the old layout.)
+    }
     fs::write(&marker, "").unwrap();
 
     // Find the extracted directory (GitHub tarballs extract to {repo}-{commit}/)
@@ -229,8 +254,20 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=RIEGELI_FFI_MIRROR_BASE");
+    println!("cargo:rerun-if-env-changed=RIEGELI_FFI_DEPS_DIR");
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let deps_dir = out_dir.join("deps");
+    // RIEGELI_FFI_DEPS_DIR points at a persistent (possibly pre-populated)
+    // dependency directory — tarballs and/or already-extracted trees — so
+    // the C++ sources survive `cargo clean` and can be provisioned offline.
+    // Trust boundary: the BLAKE2b pins gate tarballs only. An extracted
+    // tree (with its .done marker) is trusted as-is, exactly like OUT_DIR
+    // state — point this at a directory you control.
+    let deps_dir = match env::var("RIEGELI_FFI_DEPS_DIR") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => out_dir.join("deps"),
+    };
     fs::create_dir_all(&deps_dir).unwrap();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

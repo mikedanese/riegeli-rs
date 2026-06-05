@@ -421,3 +421,65 @@ fn straddling_chunk_header_cpp_write_rust_read() {
         "sweep never produced a straddling chunk header; widen the range"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Hostile-input cross-implementation agreement
+// ---------------------------------------------------------------------------
+
+/// A transposed chunk claiming buffers but zero buckets (reduced from a
+/// failing fuzz input) must be REJECTED by both implementations — the Rust decoder
+/// errors with "buffers but no buckets", and the C++ reference fails the
+/// same condition ("Too few buckets"). Pinning both sides keeps the hostile-
+/// input behavior from drifting apart.
+#[test]
+fn hostile_buffers_without_buckets_rejected_by_both_implementations() {
+    // A complete minimal file: [block header][signature][hostile transposed
+    // chunk at offset 64: num_buckets=0, num_buffers=38, valid hashes].
+    const HOSTILE_FILE: &[u8] = &[
+    0x83, 0xAF, 0x70, 0xD1, 0x0D, 0x88, 0x4A, 0x3F, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x91, 0xBA, 0xC2, 0x3C, 0x92, 0x87, 0xE1, 0xA9, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xE1, 0x9F, 0x13, 0xC0, 0xE9, 0xB1, 0xC3, 0x72,
+    0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x14, 0x45, 0xA7, 0xB4, 0x60, 0xC2, 0xDE, 0x48,
+    0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0xD6, 0xBC, 0xD5,
+    0x73, 0x2C, 0x63, 0xFF, 0x74, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x26,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    ];
+
+    // Rust reader rejects it.
+    let mut reader = riegeli::RecordReader::new(
+        std::io::Cursor::new(HOSTILE_FILE.to_vec()),
+        riegeli::ReaderOptions::new(),
+    )
+    .expect("file header parses");
+    let rust_err = loop {
+        match reader.read_record() {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("rust reader decoded a hostile chunk"),
+            Err(e) => break e,
+        }
+    };
+    assert!(
+        rust_err.to_string().contains("buffers but no buckets"),
+        "unexpected rust error: {rust_err}"
+    );
+
+    // C++ reference rejects it too (it reports the bucket/buffer mismatch).
+    let mut cpp = riegeli_ffi::RecordReader::new(HOSTILE_FILE).expect("cpp reader opens");
+    let cpp_err = loop {
+        match cpp.read_record() {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("C++ reader decoded a hostile chunk"),
+            Err(e) => break e,
+        }
+    };
+    assert!(
+        cpp_err.to_lowercase().contains("bucket"),
+        "unexpected C++ error: {cpp_err}"
+    );
+}
