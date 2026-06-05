@@ -243,7 +243,7 @@ impl SimpleChunkDecoder {
 
         let data = &chunk.data;
         let num_records = chunk.header.num_records() as usize;
-        let _decoded_data_size = chunk.header.decoded_data_size() as usize;
+        let decoded_data_size = chunk.header.decoded_data_size();
 
         // Must have at least 1 byte for compression type.
         if data.is_empty() {
@@ -257,13 +257,13 @@ impl SimpleChunkDecoder {
         match compression_byte {
             0x00 => {
                 // Uncompressed path
-                decode_uncompressed(&data[1..], num_records)
+                decode_uncompressed(&data[1..], num_records, decoded_data_size)
             }
             b'b' => {
                 // Brotli
                 #[cfg(feature = "brotli")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Brotli)
+                    decode_compressed(&data[1..], num_records, CompressionType::Brotli, decoded_data_size)
                 }
                 #[cfg(not(feature = "brotli"))]
                 {
@@ -274,7 +274,7 @@ impl SimpleChunkDecoder {
                 // Zstd
                 #[cfg(feature = "zstd")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Zstd)
+                    decode_compressed(&data[1..], num_records, CompressionType::Zstd, decoded_data_size)
                 }
                 #[cfg(not(feature = "zstd"))]
                 {
@@ -285,7 +285,7 @@ impl SimpleChunkDecoder {
                 // Snappy
                 #[cfg(feature = "snappy")]
                 {
-                    decode_compressed(&data[1..], num_records, CompressionType::Snappy)
+                    decode_compressed(&data[1..], num_records, CompressionType::Snappy, decoded_data_size)
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -313,6 +313,7 @@ impl SimpleChunkDecoder {
 fn decode_uncompressed(
     payload: &[u8],
     num_records: usize,
+    decoded_data_size: u64,
 ) -> Result<SimpleChunkDecoder, RiegeliError> {
     // Read the sizes section byte length (LengthPrefixed format).
     let (sizes_byte_len, varint_consumed) = decode_u64(payload).map_err(|e| {
@@ -344,6 +345,11 @@ fn decode_uncompressed(
     // so a count beyond the section length cannot materialize (the loop
     // errors) and must not be pre-allocated for.
     let mut sizes: Vec<usize> = Vec::with_capacity(num_records.min(sizes_data.len()));
+    // Enforce the header's decoded_data_size claim incrementally while
+    // parsing sizes (matching the C++ decoder): fail fast the moment the
+    // running total exceeds the claim, and require exact equality at the
+    // end. Decoded output can then never exceed the validated header claim.
+    let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if pos >= sizes_data.len() {
             return Err(RiegeliError::MalformedData(format!(
@@ -354,7 +360,18 @@ fn decode_uncompressed(
             RiegeliError::MalformedData(format!("varint decode error at record {i}: {e}").into())
         })?;
         pos += consumed;
+        decoded_total = decoded_total
+            .checked_add(size)
+            .filter(|t| *t <= decoded_data_size)
+            .ok_or_else(|| {
+                RiegeliError::MalformedData("decoded data size larger than expected".into())
+            })?;
         sizes.push(size as usize);
+    }
+    if decoded_total != decoded_data_size {
+        return Err(RiegeliError::MalformedData(
+            "decoded data size smaller than expected".into(),
+        ));
     }
 
     let total_values_len: usize = sizes
@@ -398,6 +415,7 @@ fn decode_compressed(
     payload: &[u8],
     num_records: usize,
     compression: CompressionType,
+    decoded_data_size: u64,
 ) -> Result<SimpleChunkDecoder, RiegeliError> {
     if payload.is_empty() {
         return Err(RiegeliError::MalformedData(
@@ -460,6 +478,10 @@ fn decode_compressed(
     // Same claimed-count cap as the uncompressed path: one varint byte
     // minimum per size bounds the real element count.
     let mut sizes: Vec<usize> = Vec::with_capacity(num_records.min(sizes_bytes.len()));
+    // Same incremental decoded_data_size enforcement as the uncompressed
+    // path — the budget applies to the claimed record sizes, before any
+    // values bytes are materialized.
+    let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if spos >= sizes_bytes.len() {
             return Err(RiegeliError::MalformedData(format!(
@@ -470,7 +492,18 @@ fn decode_compressed(
             RiegeliError::MalformedData(format!("varint decode in sizes at record {i}: {e}").into())
         })?;
         spos += consumed;
+        decoded_total = decoded_total
+            .checked_add(size)
+            .filter(|t| *t <= decoded_data_size)
+            .ok_or_else(|| {
+                RiegeliError::MalformedData("decoded data size larger than expected".into())
+            })?;
         sizes.push(size as usize);
+    }
+    if decoded_total != decoded_data_size {
+        return Err(RiegeliError::MalformedData(
+            "decoded data size smaller than expected".into(),
+        ));
     }
 
     // Verify total values length
@@ -501,6 +534,28 @@ fn decode_compressed(
 
 #[cfg(test)]
 mod tests {
+    /// The decoded_data_size claim is enforced incrementally against the
+    /// parsed record sizes: over-claim fails fast, under-claim fails at the
+    /// end, and the exact sum decodes.
+    #[test]
+    fn decoded_data_size_claim_enforced_exactly() {
+        // payload: varint(sizes_byte_len=2), sizes [2, 1], values "abc"
+        let payload: &[u8] = &[2, 2, 1, b'a', b'b', b'c'];
+
+        // Exact claim decodes.
+        let mut dec = super::decode_uncompressed(payload, 2, 3).expect("exact claim ok");
+        assert_eq!(dec.read_record().unwrap().as_deref(), Some(&b"ab"[..]));
+        assert_eq!(dec.read_record().unwrap().as_deref(), Some(&b"c"[..]));
+
+        // Sizes exceeding the claim fail fast ("larger").
+        let err = super::decode_uncompressed(payload, 2, 2).unwrap_err();
+        assert!(err.to_string().contains("larger than expected"), "{err}");
+
+        // Sizes below the claim are rejected too ("smaller").
+        let err = super::decode_uncompressed(payload, 2, 4).unwrap_err();
+        assert!(err.to_string().contains("smaller than expected"), "{err}");
+    }
+
     /// The compressed path has the same checked add on its claimed sizes
     /// blob length as the uncompressed path.
     #[cfg(feature = "zstd")]
@@ -508,7 +563,7 @@ mod tests {
     fn hostile_sizes_blob_len_overflow_is_rejected_compressed() {
         // varint64(u64::MAX) as sizes_blob_len, then nothing.
         let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
-        let err = super::decode_compressed(&payload, 1, CompressionType::Zstd)
+        let err = super::decode_compressed(&payload, 1, CompressionType::Zstd, 0)
             .err()
             .expect("overflowing sizes blob length must error");
         assert!(
@@ -524,7 +579,7 @@ mod tests {
     fn hostile_sizes_byte_len_overflow_is_rejected() {
         // varint64(u64::MAX), then nothing.
         let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
-        let err = super::decode_uncompressed(&payload, 1)
+        let err = super::decode_uncompressed(&payload, 1, 0)
             .err()
             .expect("overflowing sizes length must error");
         assert!(

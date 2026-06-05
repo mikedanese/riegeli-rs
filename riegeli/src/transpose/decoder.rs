@@ -388,13 +388,24 @@ impl BufferCursorSnapshot {
 struct BackwardBuffer {
     /// Data stored in reverse order.
     data: Vec<u8>,
+    /// Hard output bound — the chunk header's claimed decoded_data_size.
+    /// Enforced incrementally on every write (matching the C++ decoder's
+    /// LimitingReader), so decoded output can never exceed the claim.
+    limit: usize,
 }
 
 impl BackwardBuffer {
-    /// Create a new backward buffer with the given capacity hint.
-    fn new(capacity: usize) -> Self {
+    /// Maximum up-front reservation. The limit itself is an attacker-claimed
+    /// size; real output past the reservation grows the Vec as bytes arrive.
+    /// (Deliberate deviation from the C++ decoder, which preallocates the
+    /// full claim.)
+    const MAX_PREALLOC: usize = 1 << 24; // 16 MiB
+
+    /// Create a new backward buffer bounded by `limit` output bytes.
+    fn new(limit: usize) -> Self {
         Self {
-            data: Vec::with_capacity(capacity),
+            data: Vec::with_capacity(limit.min(Self::MAX_PREALLOC)),
+            limit,
         }
     }
 
@@ -411,10 +422,16 @@ impl BackwardBuffer {
     /// `Vec::extend(Rev<Iter<u8>>)` which has no memcpy specialization and
     /// degenerates to byte-at-a-time push; `extend_from_slice` + `reverse`
     /// gives us two vectorized ops instead.
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), RiegeliError> {
+        if bytes.len() > self.limit - self.data.len() {
+            return Err(RiegeliError::MalformedData(
+                "decoded data size larger than expected".into(),
+            ));
+        }
         let start = self.data.len();
         self.data.extend_from_slice(bytes);
         self.data[start..].reverse();
+        Ok(())
     }
 
     /// Consume the buffer and return the data in correct forward order.
@@ -1575,7 +1592,7 @@ fn execute_node_action(
             write_nonproto_record(node, state)?;
         }
         CallbackType::CopyTag => {
-            state.dest.write(&node.tag_data[..node.tag_data_size]);
+            state.dest.write(&node.tag_data[..node.tag_data_size])?;
         }
         CallbackType::Varint { data_length } => {
             write_varint_field(node, state.dest, state.buffers, data_length)?;
@@ -1713,7 +1730,7 @@ fn write_submessage_header(
     let mut hdr = Vec::with_capacity(tag_bytes.len() + len_varint.len());
     hdr.extend_from_slice(tag_bytes);
     hdr.extend_from_slice(&len_varint);
-    dest.write(&hdr);
+    dest.write(&hdr)?;
     Ok(())
 }
 
@@ -1731,7 +1748,7 @@ fn write_nonproto_record(
         .buffer_index
         .ok_or_else(|| RiegeliError::MalformedData("nonproto node missing buffer index".into()))?;
     let data_bytes = state.buffers[data_idx].read_exact(length)?.to_vec();
-    state.dest.write(&data_bytes);
+    state.dest.write(&data_bytes)?;
     if !state.submessage_stack.is_empty() {
         return Err(RiegeliError::MalformedData(
             "submessages still open at nonproto record".into(),
@@ -1762,7 +1779,7 @@ fn write_varint_field(
     for (j, &b) in raw.iter().enumerate() {
         combined.push(if j < raw.len() - 1 { b | 0x80 } else { b });
     }
-    dest.write(&combined);
+    dest.write(&combined)?;
     Ok(())
 }
 
@@ -1782,7 +1799,7 @@ fn write_fixed_field(
     let mut combined = Vec::with_capacity(tag_size + n);
     combined.extend_from_slice(&node.tag_data[..tag_size]);
     combined.extend_from_slice(&data);
-    dest.write(&combined);
+    dest.write(&combined)?;
     Ok(())
 }
 
@@ -1804,7 +1821,7 @@ fn write_string_field(
     combined.extend_from_slice(&node.tag_data[..tag_size]);
     combined.extend_from_slice(&len_varint);
     combined.extend_from_slice(&str_data);
-    dest.write(&combined);
+    dest.write(&combined)?;
     Ok(())
 }
 
@@ -1859,7 +1876,7 @@ fn write_existence_only_field(
     let mut buf = [0u8; 13];
     buf[..tag_only.len()].copy_from_slice(tag_only);
     buf[tag_only.len()..total].copy_from_slice(zero_value);
-    dest.write(&buf[..total]);
+    dest.write(&buf[..total])?;
 
     // Skip the data buffer bytes.
     if let Some(buf_idx) = node.buffer_index {
@@ -1918,8 +1935,16 @@ fn run_state_machine(
     node_templates: &[NodeTemplate],
     include_map: Option<&IncludeFieldMap>,
 ) -> Result<(BackwardBuffer, Vec<usize>), RiegeliError> {
-    let mut dest = BackwardBuffer::new(decoded_data_size as usize);
-    let mut limits: Vec<usize> = Vec::with_capacity(num_records as usize);
+    // Checked conversion: on a 32-bit target an `as usize` cast of a >4 GiB
+    // claim would silently truncate into a tiny limit and misreport honest
+    // files as "larger than expected".
+    let limit = usize::try_from(decoded_data_size).map_err(|_| {
+        RiegeliError::MalformedData("decoded data size exceeds addressable memory".into())
+    })?;
+    let mut dest = BackwardBuffer::new(limit);
+    // num_records is a header claim; cap the reservation (one limit entry
+    // per record is pushed by the bounded transition loop below).
+    let mut limits: Vec<usize> = Vec::with_capacity((num_records as usize).min(1 << 16));
     let mut submessage_stack: Vec<SubmessageFrame> = Vec::new();
     let mut current_node_idx = first_node;
     let mut num_iters: i32 = if nodes[current_node_idx].is_implicit {
@@ -2048,6 +2073,16 @@ fn decode_all_records(
         node_templates,
         include_map,
     )?;
+
+    // Exactness: a full decode must produce exactly the claimed
+    // decoded_data_size (overshoot already failed fast inside the bounded
+    // BackwardBuffer). Under projection the decoded data is legitimately
+    // narrower than the claim, so only the upper bound applies there.
+    if include_map.is_none() && dest.pos() as u64 != decoded_data_size {
+        return Err(RiegeliError::MalformedData(
+            "decoded data size smaller than expected".into(),
+        ));
+    }
     finalize_records(dest, limits, num_records)
 }
 
@@ -2087,6 +2122,55 @@ fn contains_implicit_loop(nodes: &[StateMachineNode], _num_states: usize) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transposed chunk whose header under-claims decoded_data_size must
+    /// fail during decode ("larger than expected"), not produce output
+    /// beyond the claim; an over-claim fails the exactness check.
+    #[test]
+    fn transpose_decoded_data_size_claim_enforced() {
+        use crate::transpose::encoder::TransposeChunkEncoder;
+
+        let records: Vec<Vec<u8>> = vec![b"hello".to_vec(), b"world!".to_vec()];
+        let mut enc = TransposeChunkEncoder::new(crate::compression::CompressionType::None);
+        for r in &records {
+            enc.add_record(r).expect("add ok");
+        }
+        let chunk = enc.encode().expect("encode ok");
+        let true_claim = chunk.header.decoded_data_size();
+        assert!(true_claim > 0);
+
+        for (claim, expect) in [
+            (true_claim - 1, "larger than expected"),
+            (true_claim + 1, "smaller than expected"),
+        ] {
+            let header = crate::chunk_header::ChunkHeader::from_parts(
+                &chunk.data,
+                crate::chunk_header::ChunkType::Transposed,
+                chunk.header.num_records(),
+                claim,
+            );
+            let tampered = crate::simple_chunk::Chunk { header, data: chunk.data.clone() };
+            let err = match TransposeChunkDecoder::new_with_projection(tampered, None) {
+                Err(e) => e,
+                Ok(mut d) => {
+                    // Some layouts defer the trip to the drain.
+                    loop {
+                        match d.read_record() {
+                            Ok(Some(_)) => continue,
+                            Ok(None) => panic!("claim {claim}: decode succeeded unexpectedly"),
+                            Err(e) => break e,
+                        }
+                    }
+                }
+            };
+            assert!(err.to_string().contains(expect), "claim {claim}: {err}");
+        }
+
+        // Untampered chunk still decodes exactly.
+        let mut ok = TransposeChunkDecoder::new_with_projection(chunk, None).expect("decode ok");
+        assert_eq!(ok.read_record().unwrap().as_deref(), Some(&b"hello"[..]));
+        assert_eq!(ok.read_record().unwrap().as_deref(), Some(&b"world!"[..]));
+    }
 
     /// A header blob claiming ~u32::MAX buckets and buffers must fail fast
     /// on underflow without first reserving tens of gigabytes for the
