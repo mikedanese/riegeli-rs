@@ -1051,7 +1051,7 @@ dependencies = [
  "nix",
  "once_cell",
  "protobuf 3.7.2",
- "protobuf-codegen 3.7.2",
+ "protobuf-codegen",
  "smallvec",
  "spin",
  "symbolic-demangle",
@@ -1142,12 +1142,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
 ]
-
-[[package]]
-name = "protobuf-codegen"
-version = "4.34.1-release"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eae99d63994a6a24b8903140dba6ee369c68933faaf09679655b4aaba4e798f"
 
 [[package]]
 name = "protobuf-macros"
@@ -1317,7 +1311,6 @@ dependencies = [
  "pprof",
  "proptest",
  "protobuf 4.34.1-release",
- "protobuf-codegen 4.34.1-release",
  "riegeli-ffi",
  "snap",
  "zstd",

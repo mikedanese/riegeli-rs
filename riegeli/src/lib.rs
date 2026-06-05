@@ -24,12 +24,10 @@ pub(crate) mod transpose;
 pub mod varint;
 
 // ── Generated protobuf ────────────────────────────────────────────────────────
+// Checked-in protoc output — see scripts/regen-proto.sh to regenerate.
 #[allow(clippy::all)]
 pub mod proto_generated {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/protobuf_generated/google/protobuf/generated.rs"
-    ));
+    include!("proto_generated/google/protobuf/generated.rs");
 }
 
 // ── Public re-exports — the complete public API ───────────────────────────────
