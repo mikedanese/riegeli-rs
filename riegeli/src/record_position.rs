@@ -34,7 +34,9 @@ impl RecordPosition {
     ///
     /// Computed as `chunk_begin + record_index`.
     pub fn numeric(&self) -> u64 {
-        self.chunk_begin + self.record_index
+        // Saturating: both fields are public and freely constructible, so a
+        // pathological pair must not panic a public accessor.
+        self.chunk_begin.saturating_add(self.record_index)
     }
 }
 

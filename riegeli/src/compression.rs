@@ -389,7 +389,9 @@ pub(crate) fn decompress_data(
         CompressionType::Brotli => {
             #[cfg(feature = "brotli")]
             {
-                decompress_brotli(data, data.len() * 4)
+                // Saturating: the hint is advisory (the prealloc is capped
+                // downstream); an unchecked * 4 overflows 32-bit usize.
+                decompress_brotli(data, data.len().saturating_mul(4))
             }
             #[cfg(not(feature = "brotli"))]
             {
