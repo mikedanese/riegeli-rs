@@ -602,13 +602,10 @@ impl TransposeChunkDecoder {
             include_map.as_ref(),
         )?;
 
-        // When projection-during-decode is active (include_map was Some), the
-        // decoded data is already narrow — no post-processing apply() needed.
-        // The apply() fallback is only used for non-transpose code paths.
-        let (data, limits) = (decoded_data, limits);
-
+        // Projection happens entirely during decode (via include_map); the
+        // decoded data is already narrow and needs no post-processing.
         Ok(Self {
-            data,
+            data: decoded_data,
             limits,
             next_yield: 0,
         })
