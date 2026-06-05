@@ -260,11 +260,107 @@ pub(crate) fn decompress_with_prefix(
     if compression == CompressionType::None {
         return Ok(data.to_vec());
     }
-    // Strip the varint64(uncompressed_size) prefix.
-    let (_uncompressed_size, consumed) = decode_u64(data).map_err(|e| {
+    // Strip the varint64(uncompressed_size) prefix, then hold the stream to
+    // it: decompression stops (and errors) one byte past the claim instead
+    // of materializing whatever the stream expands to, and the result must
+    // match the claim exactly — downstream bucket/buffer splitting indexes
+    // by these declared sizes.
+    let (uncompressed_size, consumed) = decode_u64(data).map_err(|e| {
         RiegeliError::MalformedData(format!("reading uncompressed_size prefix: {e}").into())
     })?;
-    decompress_raw(&data[consumed..], compression)
+    let out = decompress_data_capped(&data[consumed..], compression, uncompressed_size)?;
+    if out.len() as u64 != uncompressed_size {
+        return Err(RiegeliError::MalformedData(format!(
+            "decompressed size {} != declared {uncompressed_size}",
+            out.len()
+        ).into()));
+    }
+    Ok(out)
+}
+
+/// Decompress with a hard output cap: reading stops one byte past
+/// `max_len` and errors, so a decompression bomb can materialize at most
+/// `max_len + 1` bytes no matter what the stream would expand to.
+pub(crate) fn decompress_data_capped(
+    data: &[u8],
+    compression: CompressionType,
+    max_len: u64,
+) -> Result<Vec<u8>, RiegeliError> {
+    use std::io::Read as _;
+    let check = |out: Vec<u8>| {
+        if out.len() as u64 > max_len {
+            Err(RiegeliError::MalformedData(format!(
+                "decompressed data exceeds its declared size ({max_len} bytes)"
+            ).into()))
+        } else {
+            Ok(out)
+        }
+    };
+    match compression {
+        CompressionType::None => check(data.to_vec()),
+        CompressionType::Brotli => {
+            #[cfg(feature = "brotli")]
+            {
+                const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
+                let mut out =
+                    Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
+                let reader = brotli::Decompressor::new(data, 4096);
+                reader
+                    .take(max_len.saturating_add(1))
+                    .read_to_end(&mut out)
+                    .map_err(|e| {
+                        RiegeliError::MalformedData(format!("brotli decompress error: {e}").into())
+                    })?;
+                check(out)
+            }
+            #[cfg(not(feature = "brotli"))]
+            {
+                Err(RiegeliError::UnsupportedCompression(CompressionType::Brotli as u8))
+            }
+        }
+        CompressionType::Zstd => {
+            #[cfg(feature = "zstd")]
+            {
+                const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
+                let mut out =
+                    Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
+                let reader = zstd::stream::read::Decoder::new(data).map_err(|e| {
+                    RiegeliError::MalformedData(format!("zstd decoder init: {e}").into())
+                })?;
+                reader
+                    .take(max_len.saturating_add(1))
+                    .read_to_end(&mut out)
+                    .map_err(|e| {
+                        RiegeliError::MalformedData(format!("zstd decompress error: {e}").into())
+                    })?;
+                check(out)
+            }
+            #[cfg(not(feature = "zstd"))]
+            {
+                Err(RiegeliError::UnsupportedCompression(CompressionType::Zstd as u8))
+            }
+        }
+        CompressionType::Snappy => {
+            #[cfg(feature = "snappy")]
+            {
+                // Snappy frames declare their decompressed length up front;
+                // reject before allocating rather than after.
+                let declared = snap::raw::decompress_len(data).map_err(|e| {
+                    RiegeliError::MalformedData(format!("snappy length error: {e}").into())
+                })?;
+                if declared as u64 > max_len {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "decompressed data exceeds its declared size ({max_len} bytes)"
+                    ).into()));
+                }
+                decompress_snappy(data)
+            }
+            #[cfg(not(feature = "snappy"))]
+            {
+                Err(RiegeliError::UnsupportedCompression(CompressionType::Snappy as u8))
+            }
+        }
+    }
 }
 
 /// Decompress raw compressed bytes (no varint prefix).

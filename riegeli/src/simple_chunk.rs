@@ -24,7 +24,7 @@
 
 use crate::chunk_header::{ChunkHeader, ChunkType};
 #[cfg(any(feature = "brotli", feature = "zstd", feature = "snappy"))]
-use crate::compression::decompress_data;
+use crate::compression::decompress_data_capped;
 use crate::compression::{CompressOptions, CompressionType};
 use crate::error::RiegeliError;
 use crate::varint::{decode_u64, encode_u64};
@@ -454,7 +454,19 @@ fn decode_compressed(
     let uncompressed_sizes_len = uncompressed_sizes_len as usize;
     let compressed_sizes = &sizes_blob[consumed2..];
 
-    let sizes_bytes = decompress_data(compressed_sizes, compression)?;
+    // The sizes section holds one varint per record (at most 10 bytes
+    // each), so its decompressed length is structurally bounded by the
+    // record count — reject oversized claims before decompressing, and
+    // cap the decompression at the claim.
+    let max_sizes_len = (num_records as u64).saturating_mul(10);
+    if uncompressed_sizes_len as u64 > max_sizes_len {
+        return Err(RiegeliError::MalformedData(format!(
+            "claimed sizes length {uncompressed_sizes_len} exceeds {max_sizes_len} \
+             ({num_records} records x 10-byte varints)"
+        ).into()));
+    }
+    let sizes_bytes =
+        decompress_data_capped(compressed_sizes, compression, uncompressed_sizes_len as u64)?;
     if sizes_bytes.len() != uncompressed_sizes_len {
         return Err(RiegeliError::MalformedData(format!(
             "decompressed sizes length {} != expected {}",
@@ -463,24 +475,16 @@ fn decode_compressed(
         ).into()));
     }
 
-    // Parse values blob: varint64(uncompressed_values_len), compressed values data
-    let values_blob = &payload[pos..];
-    let (uncompressed_values_len, consumed3) = decode_u64(values_blob).map_err(|e| {
-        RiegeliError::MalformedData(format!("failed to read uncompressed_values_len: {e}").into())
-    })?;
-    let _uncompressed_values_len = uncompressed_values_len as usize;
-    let compressed_values = &values_blob[consumed3..];
-
-    let values_bytes = decompress_data(compressed_values, compression)?;
-
     // Parse sizes section
     let mut spos = 0usize;
     // Same claimed-count cap as the uncompressed path: one varint byte
     // minimum per size bounds the real element count.
     let mut sizes: Vec<usize> = Vec::with_capacity(num_records.min(sizes_bytes.len()));
     // Same incremental decoded_data_size enforcement as the uncompressed
-    // path — the budget applies to the claimed record sizes, before any
-    // values bytes are materialized.
+    // path. The budget is applied to the parsed sizes BEFORE the values
+    // blob is decompressed, and the values decompression below is capped
+    // at decoded_data_size, so a values-blob decompression bomb cannot
+    // materialize more than the hash-validated header claim.
     let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if spos >= sizes_bytes.len() {
@@ -505,6 +509,23 @@ fn decode_compressed(
             "decoded data size smaller than expected".into(),
         ));
     }
+
+    // Parse values blob: varint64(uncompressed_values_len), compressed
+    // values data. Decompressed values are exactly the concatenated
+    // records, so the claim must equal decoded_data_size, and the
+    // decompression is capped there.
+    let values_blob = &payload[pos..];
+    let (uncompressed_values_len, consumed3) = decode_u64(values_blob).map_err(|e| {
+        RiegeliError::MalformedData(format!("failed to read uncompressed_values_len: {e}").into())
+    })?;
+    if uncompressed_values_len != decoded_data_size {
+        return Err(RiegeliError::MalformedData(format!(
+            "claimed values length {uncompressed_values_len} != decoded data size {decoded_data_size}"
+        ).into()));
+    }
+    let compressed_values = &values_blob[consumed3..];
+    let values_bytes =
+        decompress_data_capped(compressed_values, compression, decoded_data_size)?;
 
     // Verify total values length
     let total_values_len: usize = sizes
@@ -554,6 +575,44 @@ mod tests {
         // Sizes below the claim are rejected too ("smaller").
         let err = super::decode_uncompressed(payload, 2, 4).unwrap_err();
         assert!(err.to_string().contains("smaller than expected"), "{err}");
+    }
+
+    /// A values blob that decompresses far beyond decoded_data_size must be
+    /// stopped by the output cap — not materialized and then rejected. The
+    /// bomb here is 1 MiB of zeros compressed to a few hundred bytes, with
+    /// a tiny decoded_data_size claim; pre-fix, the full expansion was
+    /// allocated before any budget check ran.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn values_decompression_bomb_is_capped() {
+        use crate::varint::encode_u64;
+
+        // sizes section: one record of size 3 (so the budget loop passes
+        // with decoded_data_size = 3).
+        let sizes_plain: Vec<u8> = encode_u64(3);
+        let sizes_compressed =
+            crate::compression::compress_zstd(&sizes_plain, CompressOptions::default()).unwrap();
+        let mut sizes_blob = encode_u64(sizes_plain.len() as u64);
+        sizes_blob.extend_from_slice(&sizes_compressed);
+
+        // values blob: claims length 3 but the compressed stream expands to
+        // 1 MiB of zeros.
+        let bomb_plain = vec![0u8; 1 << 20];
+        let bomb_compressed =
+            crate::compression::compress_zstd(&bomb_plain, CompressOptions::default()).unwrap();
+        let mut payload = encode_u64(sizes_blob.len() as u64);
+        payload.extend_from_slice(&sizes_blob);
+        payload.extend_from_slice(&encode_u64(3)); // claimed values length = 3
+        payload.extend_from_slice(&bomb_compressed);
+
+        let err = super::decode_compressed(&payload, 1, CompressionType::Zstd, 3)
+            .err()
+            .expect("decompression bomb must be rejected");
+        assert!(
+            err.to_string().contains("exceeds its declared size")
+                || err.to_string().contains("decompress"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The compressed path has the same checked add on its claimed sizes
