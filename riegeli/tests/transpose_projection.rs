@@ -624,3 +624,36 @@ fn sequential_existence_only_submessages() {
     expected.push(0x00);
     assert_eq!(got[0], expected, "sequential EO submessages must pair independently");
 }
+
+/// C++ parity (include-type min-resolution): when a projection contains BOTH
+/// an existence-only path for a submessage and a fully-included child inside
+/// it, the child wins (C++ resolves conflicts with std::min where
+/// IncludeFully < IncludeChild < ExistenceOnly) — the submessage is framed
+/// normally with the included child's real content, and non-included
+/// siblings inside it are excluded.
+#[test]
+fn existence_only_upgraded_by_included_child_matches_cpp() {
+    let mut inner = encode_varint_field(2, 7);
+    inner.extend_from_slice(&encode_varint_field(3, 9)); // excluded sibling
+    let outer = encode_string_field(1, &inner);
+
+    let data = write_records(
+        &[outer.as_slice()],
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new()
+        .add_field(Field::new(vec![1]).existence_only())
+        .add_field(Field::new(vec![1, 2]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), 1);
+
+    // Expected: field 1 { field 2 = 7 } — framed with real content.
+    let expected_inner = encode_varint_field(2, 7);
+    let expected = encode_string_field(1, &expected_inner);
+    assert_eq!(
+        got[0], expected,
+        "included child must win over existence-only (C++ min-resolution)"
+    );
+}
