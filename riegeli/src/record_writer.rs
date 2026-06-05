@@ -437,26 +437,25 @@ impl<W: Write> RecordWriter<W> {
         // Then data_size = target - add_with_overhead(current, CHUNK_HEADER_SIZE).
         // But if that's negative, we go to the next alignment boundary.
 
-        let mut target = ((current / alignment) + 1) * alignment;
-
-        // The end of the padding chunk = add_with_overhead(current, CHUNK_HEADER_SIZE + data_size).
-        // We want that to equal `target`.
-        // So: add_with_overhead(current, CHUNK_HEADER_SIZE + data_size) = target.
-        // Use distance_without_overhead to find the needed logical bytes:
-        let logical_end = crate::block_arithmetic::distance_without_overhead(current, target);
+        // The end of the padding chunk = add_with_overhead(current,
+        // CHUNK_HEADER_SIZE + data_size); we want that to equal `target`.
         let header_logical = crate::block_arithmetic::distance_without_overhead(
             current,
             add_with_overhead(current, CHUNK_HEADER_SIZE),
         );
 
-        let data_size = if logical_end > header_logical {
-            logical_end - header_logical
-        } else {
-            // Not enough room for even the header at this boundary; go to the next.
+        // Advance to the nearest boundary that can fit the 40-byte chunk
+        // header. Small alignments may need several steps — a single step
+        // (with a saturating fallback) used to yield a zero data size and
+        // overshoot the boundary, emitting padding that did not land on a
+        // multiple of the alignment at all.
+        let mut target = ((current / alignment) + 1) * alignment;
+        let mut logical_end = crate::block_arithmetic::distance_without_overhead(current, target);
+        while logical_end < header_logical {
             target += alignment;
-            let logical_end2 = crate::block_arithmetic::distance_without_overhead(current, target);
-            logical_end2.saturating_sub(CHUNK_HEADER_SIZE)
-        };
+            logical_end = crate::block_arithmetic::distance_without_overhead(current, target);
+        }
+        let data_size = logical_end - header_logical;
 
         // Build the padding data (all zeros).
         let padding_data = vec![0u8; data_size as usize];
