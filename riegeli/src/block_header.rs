@@ -3,8 +3,11 @@
 //! Every Riegeli block starts with a 24-byte `BlockHeader`:
 //! ```text
 //! bytes [ 0.. 8] — header_hash     (LE u64): HighwayHash of bytes[8..24]
-//! bytes [ 8..16] — previous_chunk  (LE u64): file offset of the preceding chunk start
-//! bytes [16..24] — next_chunk      (LE u64): file offset of the following chunk start
+//! bytes [ 8..16] — previous_chunk  (LE u64): distance from this block boundary
+//!                   back to the start of the chunk in progress at it (0 if a
+//!                   chunk starts exactly here)
+//! bytes [16..24] — next_chunk      (LE u64): distance from this block boundary
+//!                   forward to the next chunk start
 //! ```
 
 use crate::hash::highway_hash_64;
@@ -14,9 +17,9 @@ use crate::hash::highway_hash_64;
 pub struct BlockHeader {
     /// HighwayHash of bytes[8..24] of the serialized header.
     pub(crate) header_hash: u64,
-    /// File offset of the preceding chunk start.
+    /// Distance from the block boundary back to the in-progress chunk's start.
     pub(crate) previous_chunk: u64,
-    /// File offset of the following chunk start.
+    /// Distance from the block boundary forward to the next chunk's start.
     pub(crate) next_chunk: u64,
 }
 
@@ -58,13 +61,13 @@ impl BlockHeader {
         bytes
     }
 
-    /// The `previous_chunk` field: file offset of the preceding chunk start.
+    /// The `previous_chunk` field: distance back to the in-progress chunk's start.
     #[allow(dead_code)]
     pub fn previous_chunk(&self) -> u64 {
         self.previous_chunk
     }
 
-    /// The `next_chunk` field: file offset of the following chunk start.
+    /// The `next_chunk` field: distance forward to the next chunk's start.
     #[allow(dead_code)]
     pub fn next_chunk(&self) -> u64 {
         self.next_chunk

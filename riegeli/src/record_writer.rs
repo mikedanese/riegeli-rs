@@ -520,8 +520,8 @@ impl<W: Write> RecordWriter<W> {
             .collect();
 
         // Write all_bytes to the stream, inserting block headers at boundaries.
-        // `previous_chunk` for any mid-chunk block header = chunk_start (most recent chunk start).
-        // `next_chunk` for any mid-chunk block header = chunk_end_pos.
+        // Block header fields are distances from the boundary: back to
+        // chunk_start and forward to chunk_end_pos.
         self.last_chunk_start = chunk_start;
         self.write_bytes_with_block_headers(&all_bytes, chunk_start, chunk_end_pos)?;
 
@@ -997,8 +997,34 @@ mod tests {
     fn record_count_padding_across_block_boundaries() {
         use crate::record_reader::{ReaderOptions, RecordReader};
 
+        /// Block boundaries falling strictly inside a chunk's span, read
+        /// straight from the raw block-header bytes (previous-chunk distance
+        /// nonzero), independent of reader and writer position bookkeeping.
+        fn interior_boundaries(data: &[u8]) -> usize {
+            let block = BLOCK_SIZE as usize;
+            let mut boundary = block;
+            let mut count = 0;
+            while boundary + BLOCK_HEADER_SIZE as usize <= data.len() {
+                let prev =
+                    u64::from_le_bytes(data[boundary + 8..boundary + 16].try_into().unwrap());
+                if prev > 0 {
+                    count += 1;
+                }
+                boundary += block;
+            }
+            count
+        }
+
         // Sweep counts so chunk_begin + num_records lands before, inside, and
         // after block-header windows, crossing one and two boundaries.
+        //
+        // The multi-boundary values are the load-bearing ones: with the old
+        // overshoot bug, a single-boundary file (e.g. n=70k) still read back
+        // cleanly — the 24 stray bytes landed at EOF and were absorbed —
+        // while only padding that crossed a second boundary corrupted a
+        // readable position. The assertion below keeps the sweep honest if
+        // the list is ever trimmed.
+        let mut max_interior = 0usize;
         for n in [70_000usize, 131_000, 131_020, 131_080, 200_000, 262_100] {
             let mut buf = Cursor::new(Vec::<u8>::new());
             {
@@ -1013,6 +1039,7 @@ mod tests {
                 w.flush().expect("flush ok");
             }
             let data = buf.into_inner();
+            max_interior = max_interior.max(interior_boundaries(&data));
 
             let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())
                 .expect("reader new ok");
@@ -1029,6 +1056,12 @@ mod tests {
             }
             assert_eq!(count, n, "n={n}: record count mismatch");
         }
+        assert!(
+            max_interior >= 2,
+            "sweep never produced padding crossing two block boundaries \
+             (max interior boundaries: {max_interior}); the old overshoot \
+             bug is only observable past the second boundary"
+        );
     }
 
     /// Spec tests for the C++ chunk-position convention: sweep

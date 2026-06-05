@@ -206,8 +206,9 @@ fn criterion_20_7b_cpp_write_brotli_single_record_rust_read() {
     );
 }
 
+// Not gated on the brotli feature: zero records are written, so no brotli
+// code runs and the empty-file edge stays covered in reduced-feature builds.
 #[test]
-#[cfg(feature = "brotli")]
 fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
@@ -223,8 +224,9 @@ fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
     );
 }
 
+// Not gated on the brotli feature: zero records are written, so no brotli
+// code runs and the empty-file edge stays covered in reduced-feature builds.
 #[test]
-#[cfg(feature = "brotli")]
 fn criterion_20_7d_cpp_write_brotli_empty_file_rust_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
@@ -345,16 +347,25 @@ fn extra_cpp_write_brotli_zero_len_records_rust_read() {
 
 /// True if any chunk in `data` has a header beginning within 40 bytes below
 /// a 64 KiB multiple (i.e. the header is interrupted by a block header).
+///
+/// Detected by direct inspection of the raw block-header bytes — deliberately
+/// NOT via either reader, whose position bookkeeping is part of what these
+/// tests exercise. The 24-byte block header at each 64 KiB boundary stores at
+/// bytes [8..16] the distance back to the start of the chunk in progress
+/// there; a 40-byte chunk header straddles the boundary iff that distance is
+/// in (0, 40).
 fn has_straddling_chunk_header(data: &[u8]) -> bool {
-    use riegeli::{ReaderOptions, RecordReader};
-    let mut reader = RecordReader::new(std::io::Cursor::new(data.to_vec()), ReaderOptions::new())
-        .expect("reader new ok");
+    const BLOCK_SIZE: usize = 65536;
+    const BLOCK_HEADER_SIZE: usize = 24;
+    const CHUNK_HEADER_SIZE: u64 = 40;
+    let mut boundary = BLOCK_SIZE;
     let mut straddles = false;
-    while reader.read_record().expect("read ok").is_some() {
-        let begin = reader.last_pos().chunk_begin;
-        if begin % 65536 > 65536 - 40 {
+    while boundary + BLOCK_HEADER_SIZE <= data.len() {
+        let prev = u64::from_le_bytes(data[boundary + 8..boundary + 16].try_into().unwrap());
+        if 0 < prev && prev < CHUNK_HEADER_SIZE {
             straddles = true;
         }
+        boundary += BLOCK_SIZE;
     }
     straddles
 }
