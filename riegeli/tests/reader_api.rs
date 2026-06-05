@@ -76,8 +76,9 @@ fn criterion_3_last_record_is_valid() {
 
     let recovery_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let recovery_fired_clone = recovery_fired.clone();
-    let opts = ReaderOptions::new().recovery(move |_pos, _err| {
+    let opts = ReaderOptions::new().recovery(move |_region| {
         recovery_fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
     });
 
     let mut reader2 = RecordReader::new(Cursor::new(raw), opts).expect("reader new");

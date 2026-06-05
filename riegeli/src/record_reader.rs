@@ -8,7 +8,10 @@
 //!    read a 40-byte `ChunkHeader`, read `data_size` bytes, validate, decode.
 //! 3. If a hash validation fails:
 //!    - Without recovery: return `Err`.
-//!    - With recovery: call the callback, skip forward to the next block boundary, resume.
+//!    - With recovery: compute the invalid region, call the callback with
+//!      it, and — if the callback returns `true` — resume reading at the
+//!      region's end (exactly one bad chunk when its header is trustworthy,
+//!      the next block boundary otherwise).
 
 use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom};
@@ -24,7 +27,14 @@ use crate::simple_chunk::{Chunk, SimpleChunkDecoder};
 use crate::transpose::decoder::TransposeChunkDecoder;
 
 /// Type alias for the optional recovery callback.
-type RecoveryCallback = Option<Box<dyn Fn(u64, &RiegeliError)>>;
+///
+/// C++ equivalent: `std::function<bool(const SkippedRegion&, RecordReaderBase&)>`.
+/// The Rust callback does not receive the reader (it is owned by the reader,
+/// so a mutable reference would alias); after a cancelled operation returns,
+/// the caller repositions the reader itself, and
+/// [`RecordReader::last_skipped_region`] exposes the region that was
+/// reported.
+type RecoveryCallback = Option<Box<dyn FnMut(&crate::SkippedRegion) -> bool>>;
 
 /// Options for configuring a [`RecordReader`].
 pub struct ReaderOptions {
@@ -42,11 +52,31 @@ impl ReaderOptions {
         }
     }
 
-    /// Set a recovery callback invoked when a corrupted region is encountered.
+    /// Set a recovery callback invoked when a corrupted region is
+    /// encountered.
     ///
-    /// The callback receives `(file_pos, error)`. After calling it, the reader
-    /// skips forward to the next block boundary and attempts to continue reading.
-    pub fn recovery<F: Fn(u64, &RiegeliError) + 'static>(mut self, f: F) -> Self {
+    /// The callback receives the [`SkippedRegion`](crate::SkippedRegion)
+    /// about to be skipped. Returning `true` skips the region and continues
+    /// the operation; returning `false` cancels it, and the operation
+    /// returns the original error.
+    ///
+    /// The region's `end()` is exactly where the reader resumes: one bad
+    /// chunk when its header is trustworthy (hash-valid with
+    /// stream-bounded claims), the next block boundary otherwise.
+    ///
+    /// Divergences from the C++ `set_recovery`
+    /// (`std::function<bool(const SkippedRegion&, RecordReaderBase&)>`):
+    ///
+    /// - No reader parameter (see the type-alias note); use
+    ///   [`RecordReader::last_skipped_region`] after a cancelled call.
+    /// - Cancelling follows the C++ shape: the region is already skipped
+    ///   when the callback runs, so returning `false` reports the error
+    ///   once and the NEXT operation continues past the rejected region —
+    ///   the callback is never re-invoked for a region it rejected, and a
+    ///   retry loop makes progress. A caller that wants to stop AT the
+    ///   damage can take [`RecordReader::last_skipped_region`] and
+    ///   `seek` to its `begin()`.
+    pub fn recovery<F: FnMut(&crate::SkippedRegion) -> bool + 'static>(mut self, f: F) -> Self {
         self.recovery = Some(Box::new(f));
         self
     }
@@ -77,6 +107,14 @@ enum ActiveDecoder {
 }
 
 impl ActiveDecoder {
+    // NOTE: the recovery design relies on decoders being structurally
+    // infallible after construction — both variants slice pre-validated
+    // ranges out of pre-decoded buffers, so the Result below has no
+    // reachable Err today. That is what lets every recoverable failure be
+    // position-stable at a chunk boundary (the C++ kRecoverChunkDecoder
+    // sub-chunk case collapses to the chunk case here). If a streaming or
+    // lazy decoder is ever introduced, mid-chunk failures become possible
+    // and need their own position-stability and SkippedRegion story.
     fn read_record(&mut self) -> Result<Option<Vec<u8>>, RiegeliError> {
         match self {
             ActiveDecoder::Simple(d) => d.read_record(),
@@ -114,6 +152,17 @@ pub struct RecordReader<R: Read + Seek> {
     /// Bounds header-claimed sizes before they drive arithmetic or
     /// allocation — the header hash proves integrity, not honesty.
     stream_len: u64,
+    /// The most recent region reported to the recovery callback (whether it
+    /// continued or cancelled). `None` until the callback first fires.
+    last_skipped_region: Option<crate::SkippedRegion>,
+    /// Failure-time classification for recovery: `Some(chunk_end)` when the
+    /// failing chunk's header was hash-valid with stream-bounded claims at
+    /// the MOMENT of failure (its extent is trustworthy), `None` otherwise.
+    /// Set by the error sites, consumed by try_recover_at — never derived
+    /// by re-reading, which is a time-of-check/time-of-failure hazard (a
+    /// stream that grows between failure and recovery could reclassify an
+    /// untrusted failure as trusted and skip a readable chunk).
+    pending_trusted_end: Option<u64>,
 }
 
 impl<R: Read + Seek> RecordReader<R> {
@@ -172,6 +221,8 @@ impl<R: Read + Seek> RecordReader<R> {
             at_eof: false,
             last_record_is_valid: true,
             stream_len,
+            last_skipped_region: None,
+            pending_trusted_end: None,
         })
     }
 
@@ -180,6 +231,7 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Returns `Ok(Some(bytes))` for a record, `Ok(None)` at EOF, or `Err` on
     /// unrecoverable corruption (when no recovery callback is set).
     pub fn read_record(&mut self) -> Result<Option<Vec<u8>>, RiegeliError> {
+        self.pending_trusted_end = None;
         loop {
             if self.at_eof {
                 return Ok(None);
@@ -221,33 +273,19 @@ impl<R: Read + Seek> RecordReader<R> {
                     return Ok(None);
                 }
                 Err(e) => {
-                    // Corruption detected.
-                    if self.recovery.is_some() {
-                        // Call recovery callback and skip to the next block boundary.
-                        let file_pos = self.next_chunk_file_pos;
-                        if let Some(cb) = &self.recovery {
-                            cb(file_pos, &e);
-                        }
-                        // Mark the last record as coming from a recovered (invalid) region.
-                        self.last_record_is_valid = false;
-                        // Skip to the next block boundary.
-                        let next_boundary = next_block_boundary(file_pos);
-                        if next_boundary == file_pos && is_block_boundary(file_pos) {
-                            // Already at a block boundary — skip a full block.
-                            self.next_chunk_file_pos = file_pos + BLOCK_SIZE;
-                        } else {
-                            self.next_chunk_file_pos = next_boundary;
-                        }
-                        // Seek to that position.
-                        if self
-                            .reader
-                            .seek(SeekFrom::Start(self.next_chunk_file_pos))
-                            .is_err()
-                        {
-                            self.at_eof = true;
+                    // Corruption detected. With recovery: report the region
+                    // and — on `true` — resume at its end (C++: ReadRecord is
+                    // retried). On `false` or without recovery, return the
+                    // original error (the reader stays position-stable at
+                    // the bad region; a bare retry re-reports it).
+                    let at = self.next_chunk_file_pos;
+                    if self.try_recover_at(at, &e) {
+                        if self.at_eof {
+                            // Resync seek failed (region end past a
+                            // shrunken stream) — clean end of file.
                             return Ok(None);
                         }
-                        // Continue trying to read from the new position.
+                        // Continue reading from the region end.
                     } else {
                         return Err(e);
                     }
@@ -275,6 +313,7 @@ impl<R: Read + Seek> RecordReader<R> {
     ///
     /// Loads the chunk at `pos.chunk_begin` and skips `pos.record_index` records.
     pub fn seek(&mut self, pos: RecordPosition) -> Result<(), RiegeliError> {
+        self.pending_trusted_end = None;
         // Seek to the chunk_begin, accounting for block headers.
         let chunk_file_pos = pos.chunk_begin;
 
@@ -300,7 +339,16 @@ impl<R: Read + Seek> RecordReader<R> {
                 // reads nothing.
                 return Ok(());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // C++: Seek returns the result of the recovery function.
+                // On `true` the reader is positioned at the region end.
+                let at = self.next_chunk_file_pos;
+                if self.try_recover_at(at, &e) {
+                    self.pos = RecordPosition::new(self.next_chunk_file_pos, 0);
+                    return Ok(());
+                }
+                return Err(e);
+            }
         }
 
         // Skip record_index records.
@@ -331,6 +379,7 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Scans forward through the file to find the chunk where `chunk_begin <= numeric`
     /// and returns positioned at `record_index = numeric - chunk_begin` within that chunk.
     pub fn seek_numeric(&mut self, numeric: u64) -> Result<(), RiegeliError> {
+        self.pending_trusted_end = None;
         // Scan from the first data chunk (offset 64) to find the right chunk.
         // We need to find a chunk where chunk_begin <= numeric < chunk_begin + num_records.
         // If no such chunk exists, seek to the first chunk at/after numeric.
@@ -353,6 +402,15 @@ impl<R: Read + Seek> RecordReader<R> {
                     // last_pos keeps the last successfully read record.
                     self.current_decoder = None;
                     return Ok(());
+                }
+                Err(e) if self.recovery.is_some() => {
+                    // Skip the invalid region and keep scanning, or cancel
+                    // with the original error.
+                    if self.try_recover_at(scan_pos, &e) {
+                        scan_pos = self.next_chunk_file_pos;
+                        continue;
+                    }
+                    return Err(e);
                 }
                 Ok(Some(ch)) => {
                     let chunk_begin = scan_pos;
@@ -406,8 +464,14 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Read the file metadata chunk as raw bytes, if present.
     ///
     /// Like [`read_metadata`](Self::read_metadata), but returns the raw serialized
-    /// proto bytes without parsing. Does not change the current read position.
+    /// proto bytes without parsing. Does not change the current read position —
+    /// including under recovery: corruption at the metadata position is
+    /// reported to the callback but the region is never consumed, so a
+    /// repeated call reports the same region again (the one deliberate
+    /// exception to the consumed-once cancel contract, because consuming
+    /// would move a position this method promises not to touch).
     pub fn read_serialized_metadata(&mut self) -> Result<Option<Vec<u8>>, RiegeliError> {
+        self.pending_trusted_end = None;
         // The metadata chunk, if present, is at offset 64 (right after signature).
         let metadata_chunk_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // = 64
 
@@ -416,9 +480,24 @@ impl<R: Read + Seek> RecordReader<R> {
         // header, impossible claims, I/O failure — is corruption and must
         // not be reported as "no metadata": a caller inspecting metadata
         // first would proceed as if the file were clean.
-        let ch = match self.peek_chunk_header(metadata_chunk_pos)? {
-            Some(ch) => ch,
-            None => return Ok(None),
+        let ch = match self.peek_chunk_header(metadata_chunk_pos) {
+            Ok(Some(ch)) => ch,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                // C++: ReadMetadata returns the result of the recovery
+                // function — on `true` the file simply has no (readable)
+                // metadata. REPORT-ONLY: this method's contract is that it
+                // does not change the read position (C++'s ReadMetadata is
+                // a sequential read with no such promise, so there is no
+                // reference position behavior to match — ours must honor
+                // our own documentation). Repositioning here rewound a
+                // mid-stream reader to the skipped region's end, replaying
+                // or dropping records.
+                if self.report_region_at(metadata_chunk_pos, &e) == Some(true) {
+                    return Ok(None);
+                }
+                return Err(e);
+            }
         };
 
         if !matches!(ch.chunk_type(), Ok(ChunkType::FileMetadata)) {
@@ -525,16 +604,36 @@ impl<R: Read + Seek> RecordReader<R> {
     ///
     /// Scans the entire file, reading only chunk headers (no data decompression).
     fn collect_data_chunks(&mut self) -> Result<Vec<(u64, u64)>, RiegeliError> {
+        self.pending_trusted_end = None;
         let first_data_chunk = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // = 64
         let mut scan_pos = first_data_chunk;
         let mut chunks = Vec::new();
 
-        // Read chunk headers until EOF (skipping leading and interleaved block headers).
-        while let Some((ch, chunk_begin, _)) = self.read_chunk_header_at(scan_pos)? {
+        // Read chunk headers until EOF (skipping leading and interleaved
+        // block headers). With recovery set, invalid regions are skipped and
+        // the scan continues (C++: Search skips invalid regions while the
+        // recovery function returns true).
+        loop {
+            let (ch, chunk_begin, _) = match self.read_chunk_header_at(scan_pos) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
+                Err(e) => {
+                    if self.try_recover_at(scan_pos, &e) {
+                        scan_pos = self.next_chunk_file_pos;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
             if !ch.is_header_valid() {
-                return Err(RiegeliError::MalformedData(format!(
+                let e = RiegeliError::MalformedData(format!(
                     "invalid chunk header at {chunk_begin} during search scan"
-                ).into()));
+                ).into());
+                if self.try_recover_at(scan_pos, &e) {
+                    scan_pos = self.next_chunk_file_pos;
+                    continue;
+                }
+                return Err(e);
             }
 
             let data_size = ch.data_size();
@@ -837,6 +936,110 @@ impl<R: Read + Seek> RecordReader<R> {
     // Internal helpers
     // -------------------------------------------------------------------------
 
+    /// The most recent region reported to the recovery callback, whether the
+    /// callback continued or cancelled. `None` if the callback never fired.
+    ///
+    /// This is the Rust stand-in for the reader parameter the C++ recovery
+    /// callback receives: after a cancelled operation returns its error, the
+    /// caller can inspect the region here and reposition explicitly.
+    pub fn last_skipped_region(&self) -> Option<&crate::SkippedRegion> {
+        self.last_skipped_region.as_ref()
+    }
+
+    /// Attempt recovery for `error`, which left the reader position-stable
+    /// at `at` (every error path rewinds to the failed chunk — the
+    /// persistence invariant).
+    ///
+    /// Computes the skipped region — COUPLED to the resync target by
+    /// construction: `region.end` is exactly where reading resumes.
+    /// A readable, hash-valid header (whose claims passed the stream bound)
+    /// gives a trustworthy extent, so exactly that chunk is skipped
+    /// (preserving siblings in the same block — more precise than a
+    /// boundary skip). Otherwise the claims cannot be trusted and the
+    /// resync is the next block boundary.
+    ///
+    /// Returns `true` if a callback is set, it returned `true`, and the
+    /// reader was repositioned to the region end; `false` otherwise (the
+    /// caller returns the original error).
+    /// Compute the region for `error` and invoke the callback WITHOUT any
+    /// repositioning side effects — for operations whose contract promises
+    /// not to move the read cursor (metadata reads). Returns `None` when no
+    /// callback is set, otherwise `Some(callback verdict)`.
+    fn report_region_at(&mut self, at: u64, error: &RiegeliError) -> Option<bool> {
+        // Consume the failure-time classification unconditionally so it can
+        // never go stale across attempts or operations.
+        let trusted_end = self.pending_trusted_end.take();
+        self.recovery.as_ref()?;
+        let begin = crate::block_arithmetic::canonical_chunk_address(at);
+        let end = match trusted_end {
+            // The failing chunk's extent was trustworthy WHEN it failed
+            // (hash-valid header, stream-bounded claims): skip exactly it.
+            Some(end) => end,
+            // Header unreadable, hash-invalid, claims unvalidated, or I/O
+            // failure: nothing about the extent can be trusted — resync at
+            // the next block boundary, clamped to the stream length (a
+            // region cannot extend past the file — except by the minimal
+            // progress margin when corruption sits at EOF — and C++
+            // reports EOF-ended regions the same way).
+            None => {
+                let boundary = next_block_boundary(begin);
+                let boundary = if boundary == begin { begin + BLOCK_SIZE } else { boundary };
+                boundary.min(self.stream_len.max(begin))
+            }
+        };
+        // Forward progress no matter what the arithmetic said — measured
+        // from the RESYNC ORIGIN `at`, not just `begin`: when `at` is the
+        // boundary+24 alias of a canonical `begin` 24 bytes earlier, an
+        // EOF-clamped end can satisfy end > begin while still equaling
+        // `at`, and the reader would spin on the same region forever (a
+        // past-EOF end is fine — the resync seek lands at EOF and reads
+        // terminate).
+        let end = end.max(begin + 1).max(at.saturating_add(1));
+        // The resume position must never be a canonical ALIAS of this
+        // region's own begin: an EOF-clamped end landing on begin's
+        // boundary+24 alias would re-read the same corrupt bytes at
+        // canonical begin and double-report overlapping regions (breaking
+        // begin-monotonicity). The condition only triggers for that exact
+        // alias, so the bump is at most one byte and cannot loop.
+        let end = if crate::block_arithmetic::canonical_chunk_address(end) <= begin {
+            end + 1
+        } else {
+            end
+        };
+        let region = crate::SkippedRegion::new(begin, end, error.to_string());
+        self.last_skipped_region = Some(region);
+        let cb = self.recovery.as_mut().expect("checked above");
+        let region_ref = self.last_skipped_region.as_ref().expect("just set");
+        Some(cb(region_ref))
+    }
+
+    fn try_recover_at(&mut self, at: u64, error: &RiegeliError) -> bool {
+        let Some(go) = self.report_region_at(at, error) else {
+            // No callback configured: leave the reader untouched so the
+            // error stays position-stable and persistent on retry.
+            return false;
+        };
+        // The region is consumed REGARDLESS of the verdict, matching the
+        // C++ reference (Recover() repositions before the callback is
+        // consulted): cancel reports the error once, but the next
+        // operation continues past the rejected region. This is what
+        // makes a naive retry loop around a cancelling callback make
+        // progress instead of re-firing the same region forever.
+        let end = self
+            .last_skipped_region
+            .as_ref()
+            .expect("set by report_region_at")
+            .end();
+        self.last_record_is_valid = false;
+        self.current_decoder = None;
+        self.at_eof = false;
+        self.next_chunk_file_pos = end;
+        if self.reader.seek(SeekFrom::Start(end)).is_err() {
+            self.at_eof = true;
+        }
+        go
+    }
+
     /// Load the next chunk from `self.next_chunk_file_pos`.
     ///
     /// Returns `Ok(true)` if a chunk was loaded into `self.current_decoder`.
@@ -844,6 +1047,8 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Returns `Err` on corruption (without recovery).
     fn load_next_chunk(&mut self) -> Result<bool, RiegeliError> {
         loop {
+            // Each chunk attempt re-classifies from scratch.
+            self.pending_trusted_end = None;
             let pos = self.next_chunk_file_pos;
 
             // Read the chunk header, skipping any leading block header and any
@@ -869,6 +1074,12 @@ impl<R: Read + Seek> RecordReader<R> {
 
             // Read the chunk data (skipping block headers).
             let chunk_data = self.read_chunk_data(data_begin, data_size)?;
+
+            // Past this point the header is hash-valid, its claims are
+            // stream-bounded, and the data bytes were physically present:
+            // the chunk's extent is trustworthy at failure time, whatever
+            // the failure (bad data hash, unknown type, construction).
+            self.pending_trusted_end = Some(data_file_end);
 
             // Validate data hash.
             if !ch.is_data_valid(&chunk_data) {
@@ -1111,6 +1322,8 @@ impl<R: Read + Seek> RecordReader<R> {
     fn load_chunk_at(&mut self, file_pos: u64) -> Result<Option<ActiveDecoder>, RiegeliError> {
         let mut file_pos = file_pos;
         loop {
+        // Each chunk attempt re-classifies from scratch.
+        self.pending_trusted_end = None;
         // Read the chunk header (skipping leading and interleaved block headers).
         let (ch, chunk_begin, data_begin) = match self.read_chunk_header_at(file_pos)? {
             Some(v) => v,
@@ -1126,6 +1339,16 @@ impl<R: Read + Seek> RecordReader<R> {
         let data_size = ch.data_size();
         let chunk_data = self.read_chunk_data(data_begin, data_size)?;
 
+        // Advance only on success: if decoder construction below fails, the
+        // position stays at this chunk so the error is persistent on retry
+        // (same convention as load_next_chunk).
+        let chunk_end_pos =
+            crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
+
+        // Header valid, claims bounded, data present: trustworthy extent
+        // for any failure from here on (see load_next_chunk).
+        self.pending_trusted_end = Some(chunk_end_pos);
+
         if !ch.is_data_valid(&chunk_data) {
             return Err(RiegeliError::MalformedData(format!(
                 "chunk data hash mismatch at file position {chunk_begin}"
@@ -1134,11 +1357,6 @@ impl<R: Read + Seek> RecordReader<R> {
 
         self.current_chunk_begin = chunk_begin;
         self.current_record_index = 0;
-        // Advance only on success: if decoder construction below fails, the
-        // position stays at this chunk so the error is persistent on retry
-        // (same convention as load_next_chunk).
-        let chunk_end_pos =
-            crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
 
         match ch.chunk_type() {
             Ok(ChunkType::Simple) => {
@@ -1387,8 +1605,9 @@ mod tests {
         let recovered_clone = Rc::clone(&recovered_positions);
 
         let cursor = Cursor::new(data);
-        let opts = ReaderOptions::new().recovery(move |pos, _err| {
-            recovered_clone.borrow_mut().push(pos);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            recovered_clone.borrow_mut().push(region.begin());
+            true
         });
         let mut reader = RecordReader::new(cursor, opts).expect("reader new ok");
 
@@ -1879,6 +2098,406 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Cancel semantics (C++ shape, adopted after the empirical trace):
+    /// the region is consumed BEFORE the callback runs — `false` makes the
+    /// failing operation return the ORIGINAL error once, but the next
+    /// operation continues past the rejected region and the callback is
+    /// never re-invoked for it. A LATER corrupt region fires the callback
+    /// afresh.
+    #[test]
+    fn recovery_cancel_reports_once_and_consumes_the_region() {
+        // [a][b CORRUPT][c][d CORRUPT][e]
+        let mut lens = Vec::new();
+        let recs: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e"];
+        for k in 1..=recs.len() {
+            lens.push(write_records(&recs[..k], WriterOptions::new().chunk_size(1)).len());
+        }
+        let mut data = write_records(&recs, WriterOptions::new().chunk_size(1));
+        data[lens[1] - 1] ^= 0xFF; // chunk "b" data
+        data[lens[3] - 1] ^= 0xFF; // chunk "d" data
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            rc.borrow_mut().push(region.clone());
+            false // cancel every region
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"a"[..]));
+        let e1 = reader.read_record().expect_err("cancel returns the original error");
+        // The region was consumed: the next read continues past "b" to "c".
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"c"[..]),
+            "rejected region is already skipped; reading continues"
+        );
+        let e2 = reader.read_record().expect_err("the LATER corrupt region errors afresh");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"e"[..]));
+        assert_eq!(reader.read_record().expect("read ok"), None);
+
+        let regions = regions.borrow();
+        assert_eq!(regions.len(), 2, "one callback per region — never re-fired");
+        assert_eq!(regions[0].begin(), lens[0] as u64, "region 1 = chunk b");
+        assert_eq!(regions[0].end(), lens[1] as u64);
+        assert_eq!(regions[1].begin(), lens[2] as u64, "region 2 = chunk d");
+        assert_eq!(regions[1].end(), lens[3] as u64);
+        assert_ne!(e1.to_string(), "", "errors carry messages");
+        let _ = e2;
+        // The accessor exposes the most recent reported region.
+        assert_eq!(reader.last_skipped_region(), Some(&regions[1]));
+    }
+
+    /// Coupled region/resync precision: corrupting one chunk's DATA (its
+    /// header stays hash-valid, so its extent is trustworthy) must skip
+    /// exactly that chunk — the region is [chunk_begin, chunk_end) and the
+    /// SIBLING chunk in the same block is recovered. The old boundary skip
+    /// threw the sibling away.
+    #[test]
+    fn recovery_skips_exactly_one_chunk_when_header_is_valid() {
+        let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+        let three = write_records(&[b"a", b"b", b"c"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        assert_eq!(&three[..two.len()], &two[..]);
+
+        let mut data = three.clone();
+        data[two.len() - 1] ^= 0xFF; // corrupt chunk "b"'s final data byte only
+        let chunk_b_begin = one.len() as u64;
+        let chunk_c_begin = two.len() as u64;
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            rc.borrow_mut().push(region.clone());
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"a"[..]));
+        // "b" is skipped; "c" — a sibling in the same block — is recovered.
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"c"[..]),
+            "sibling after the bad chunk must be recovered"
+        );
+        assert_eq!(reader.read_record().expect("read ok"), None);
+        // last_record_is_valid is per-record: "c" came from a valid chunk,
+        // so the flag is true again after it returns.
+        assert!(reader.last_record_is_valid());
+
+        let regions = regions.borrow();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].begin(), chunk_b_begin, "region begins at the bad chunk");
+        assert_eq!(
+            regions[0].end(),
+            chunk_c_begin,
+            "region ends exactly where the next chunk begins (the resync position)"
+        );
+        assert!(regions[0].message().contains("hash mismatch"));
+    }
+
+    /// When the chunk HEADER is hash-invalid, its claims cannot be trusted
+    /// to compute an extent — the region ends at the next block boundary.
+    #[test]
+    fn recovery_resyncs_to_boundary_when_header_is_invalid() {
+        let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        let mut data = two.clone();
+        data[one.len()] ^= 0xFF; // corrupt chunk 2's HEADER hash
+        let data_len = data.len() as u64;
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            rc.borrow_mut().push(region.clone());
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+        assert_eq!(reader.read_record().expect("read ok"), None, "rest of block skipped");
+
+        let regions = regions.borrow();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].begin(), one.len() as u64);
+        // Boundary-class, clamped to the stream length (the file ends well
+        // before the next 64 KiB boundary; a region cannot extend past the
+        // file — C++ reports EOF-ended regions the same way).
+        assert_eq!(
+            regions[0].end(),
+            data_len,
+            "boundary resync clamps to EOF for untrusted claims"
+        );
+    }
+
+    /// Classification must happen at FAILURE time, not recovery time: a
+    /// stream that grows between the two (every stream-length probe is a
+    /// growth opportunity) must not reclassify an untrusted failure as
+    /// trusted — that mislabeled a readable chunk as a precisely-skipped
+    /// region. With failure-time classification the claim failure stays
+    /// untrusted and the resync is the boundary, never a chunk_end computed
+    /// from claims that were unvalidatable when the error happened.
+    #[test]
+    fn recovery_classifies_at_failure_time_not_recovery_time() {
+        struct GrowOnNthEndSeek {
+            full: Vec<u8>,
+            visible: usize,
+            pos: u64,
+            end_seeks: u32,
+            grow_at: u32,
+        }
+        impl std::io::Read for GrowOnNthEndSeek {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let avail = &self.full[..self.visible];
+                let start = (self.pos as usize).min(avail.len());
+                let n = buf.len().min(avail.len() - start);
+                buf[..n].copy_from_slice(&avail[start..start + n]);
+                self.pos += n as u64;
+                Ok(n)
+            }
+        }
+        impl std::io::Seek for GrowOnNthEndSeek {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                match pos {
+                    std::io::SeekFrom::Start(p) => self.pos = p,
+                    std::io::SeekFrom::End(off) => {
+                        self.end_seeks += 1;
+                        if self.end_seeks >= self.grow_at {
+                            self.visible = self.full.len();
+                        }
+                        self.pos = (self.visible as i64 + off).max(0) as u64;
+                    }
+                    std::io::SeekFrom::Current(off) => {
+                        self.pos = (self.pos as i64 + off).max(0) as u64;
+                    }
+                }
+                Ok(self.pos)
+            }
+        }
+
+        let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
+        let full = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        let cut = one.len() + 40; // chunk B header readable, data truncated
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        // Grow generously late so construction-time probes don't trigger it,
+        // but any recovery-time re-read (the bug) would.
+        for grow_at in [3u32, 4, 5] {
+            regions.borrow_mut().clear();
+            let rc2 = Rc::clone(&rc);
+            let reader_src = GrowOnNthEndSeek {
+                full: full.clone(),
+                visible: cut,
+                pos: 0,
+                end_seeks: 0,
+                grow_at,
+            };
+            let opts = ReaderOptions::new().recovery(move |region| {
+                rc2.borrow_mut().push(region.clone());
+                true
+            });
+            let mut reader = RecordReader::new(reader_src, opts).expect("reader new ok");
+            assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+            let _ = reader.read_record(); // recovery fires on the truncated chunk
+
+            for region in regions.borrow().iter() {
+                assert!(
+                    region.end() == BLOCK_SIZE || region.end() <= cut as u64 + BLOCK_SIZE,
+                    "grow_at={grow_at}: untrusted failure must resync at a boundary"
+                );
+                assert_ne!(
+                    region.end(),
+                    full.len() as u64,
+                    "grow_at={grow_at}: region end must not be a chunk_end derived \
+                     from claims that were unvalidatable at failure time"
+                );
+            }
+        }
+    }
+
+    /// A long run of corrupt-data chunks must produce one callback per
+    /// chunk with contiguous, exactly-one-chunk regions (the coupling
+    /// invariant universally, not just for a single chunk), terminating at
+    /// EOF — no loop, no boundary fallback for trusted failures.
+    #[test]
+    fn recovery_walks_corrupt_chain_with_contiguous_regions() {
+        const N: usize = 200; // corrupt chunks between two good ones
+        // Record k..=N+1 prefix files give every chunk span.
+        let mut lens = Vec::with_capacity(N + 3);
+        let mut recs: Vec<Vec<u8>> = Vec::new();
+        for k in 0..(N + 2) {
+            recs.push(format!("r{k:03}").into_bytes());
+            let refs: Vec<&[u8]> = recs.iter().map(|r| r.as_slice()).collect();
+            lens.push(write_records(&refs, WriterOptions::new().chunk_size(1)).len());
+        }
+        let refs: Vec<&[u8]> = recs.iter().map(|r| r.as_slice()).collect();
+        let mut data = write_records(&refs, WriterOptions::new().chunk_size(1));
+        assert!(data.len() < BLOCK_SIZE as usize, "keep it single-block for span math");
+        // Corrupt the final data byte of chunks 1..=N (leave first and last).
+        for k in 1..=N {
+            let idx = lens[k] - 1;
+            data[idx] ^= 0xFF;
+        }
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            rc.borrow_mut().push(region.clone());
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"r000"[..]));
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(format!("r{:03}", N + 1).as_bytes()),
+            "the good chunk after the corrupt run must be reached"
+        );
+        assert_eq!(reader.read_record().expect("read ok"), None);
+
+        let regions = regions.borrow();
+        assert_eq!(regions.len(), N, "exactly one callback per corrupt chunk");
+        for (i, region) in regions.iter().enumerate() {
+            let k = i + 1;
+            assert_eq!(region.begin(), lens[k - 1] as u64, "chunk {k} begin");
+            assert_eq!(region.end(), lens[k] as u64, "chunk {k} end == next begin");
+        }
+    }
+
+    /// A corrupt 24-byte block-header tail at an exact block boundary: the
+    /// reader's raw position (boundary+24) canonicalizes 24 bytes BACK, and
+    /// the EOF-clamped region end equals the raw position — forward
+    /// progress must be measured from the raw position or the reader spins
+    /// forever re-reporting the same region (CWE-835, found in review).
+    #[test]
+    fn recovery_terminates_on_corrupt_block_header_tail_at_boundary() {
+        // Fill block 0 exactly: a padded file of BLOCK_SIZE bytes, then a
+        // corrupt 24-byte pseudo block header.
+        let mut data =
+            write_records(&[b"a"], WriterOptions::new().final_padding(BLOCK_SIZE));
+        assert_eq!(data.len() as u64, BLOCK_SIZE);
+        data.extend_from_slice(&[0xFFu8; 24]); // hash-invalid block header
+        assert_eq!(data.len() as u64, BLOCK_SIZE + 24);
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rr = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |r| {
+            rr.borrow_mut().push(r.clone());
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"a"[..]));
+        // Must terminate (the old clamp spun forever here).
+        assert_eq!(reader.read_record().expect("read ok"), None, "clean EOF");
+        let regions = regions.borrow();
+        assert_eq!(
+            regions.len(),
+            1,
+            "exactly ONE region — the alias-end double-report is repaired (got {regions:?})"
+        );
+        assert_eq!(regions[0].begin(), BLOCK_SIZE, "canonical begin");
+        assert_eq!(
+            regions[0].end(),
+            BLOCK_SIZE + 25,
+            "minimal progress margin: one byte past the 24-byte corrupt tail"
+        );
+    }
+
+    /// Metadata reads promise not to move the read position — recovery
+    /// firing inside one must be report-only. Repositioning here rewound a
+    /// mid-stream reader to the region end (replaying records) or skipped
+    /// block-0 chunks at the start.
+    #[test]
+    fn metadata_recovery_does_not_move_the_read_position() {
+        // [sig][chunkA@64][padding to 64 KiB][fileB: sig][chunkB "b"]
+        let mut data =
+            write_records(&[b"a"], WriterOptions::new().final_padding(BLOCK_SIZE));
+        assert_eq!(data.len() as u64, BLOCK_SIZE);
+        data.extend_from_slice(&write_records(&[b"b"], WriterOptions::new()));
+        data[64] ^= 0xFF; // corrupt chunk A's header (the metadata position)
+
+        let count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+        let rc = Rc::clone(&count);
+        let opts = ReaderOptions::new().recovery(move |_r| {
+            *rc.borrow_mut() += 1;
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+
+        let pos_before = reader.pos();
+        assert_eq!(
+            reader.read_serialized_metadata().expect("metadata ok"),
+            None,
+            "skipped region reads as absent metadata"
+        );
+        assert_eq!(*count.borrow(), 1, "callback reported the region");
+        assert_eq!(
+            reader.pos(),
+            pos_before,
+            "metadata read must not move the read position"
+        );
+
+        // The record stream is undisturbed: reading proceeds from the start,
+        // recovers past the corrupt chunk normally, and reaches "b".
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"b"[..]));
+        assert_eq!(*count.borrow(), 2, "read-path recovery fired separately");
+    }
+
+    /// Seek with recovery: C++ `Seek` returns the result of the recovery
+    /// function — on `true` the reader is positioned past the region.
+    #[test]
+    fn seek_recovers_past_invalid_region() {
+        let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+        let three = write_records(&[b"a", b"b", b"c"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        let mut data = three.clone();
+        data[two.len() - 1] ^= 0xFF; // corrupt chunk "b"'s final data byte
+
+        let opts = ReaderOptions::new().recovery(|_region| true);
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        reader
+            .seek(RecordPosition::new(one.len() as u64, 0))
+            .expect("seek with recovery must succeed");
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"c"[..]),
+            "positioned past the skipped region"
+        );
+        let _ = two;
+    }
+
+    /// Search with recovery skips invalid regions during the scan (C++
+    /// contract) and still finds targets beyond them.
+    #[test]
+    fn search_recovers_past_invalid_region() {
+        let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+        let three = write_records(&[b"a", b"b", b"c"], WriterOptions::new().chunk_size(1));
+        let mut data = three;
+        data[one.len()] ^= 0xFF; // corrupt chunk "b"'s HEADER (scan-visible)
+
+        let opts = ReaderOptions::new().recovery(|_region| true);
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        let found = reader.search(|rec| rec.cmp(&b"c"[..])).expect("search ok");
+        // "c" sits in the region skipped by the boundary resync? No: the
+        // corrupt header forces a boundary skip during the scan, and "c"
+        // lives below the boundary too, so the honest outcome is NOT
+        // FOUND without error — the scan completed, the region was
+        // skipped, and the target was inside it.
+        assert!(!found, "target inside the skipped region is reported absent");
+
+        // A target in an intact chunk before the corruption is still found.
+        let mut reader2 = {
+            let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+            let three = write_records(&[b"a", b"b", b"c"], WriterOptions::new().chunk_size(1));
+            let mut data = three;
+            data[one.len()] ^= 0xFF;
+            RecordReader::new(
+                Cursor::new(data),
+                ReaderOptions::new().recovery(|_region| true),
+            )
+            .expect("reader new ok")
+        };
+        assert!(reader2.search(|rec| rec.cmp(&b"a"[..])).expect("search ok"));
     }
 
     /// Seeking to a non-data chunk's address (here: the signature chunk of

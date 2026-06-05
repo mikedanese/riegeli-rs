@@ -19,7 +19,15 @@ fuzz_target!(|data: &[u8]| {
     let (file, opt_byte) = data.split_at(data.len() - 1);
     let mut options = riegeli::ReaderOptions::new();
     if opt_byte[0] & 1 != 0 {
-        options = options.recovery(|_pos, _err| {});
+        // Assert the callback invariants the coupled design guarantees:
+        // nonempty regions that only move forward.
+        let last_end = std::cell::Cell::new(0u64);
+        options = options.recovery(move |region| {
+            assert!(region.begin() < region.end(), "empty skipped region");
+            assert!(region.begin() >= last_end.get(), "regions moved backward");
+            last_end.set(region.end());
+            true
+        });
     }
     let cursor = std::io::Cursor::new(file.to_vec());
     let Ok(mut reader) = riegeli::RecordReader::new(cursor, options) else {

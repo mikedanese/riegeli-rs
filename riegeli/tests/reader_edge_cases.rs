@@ -174,8 +174,9 @@ fn adv_f_size_preserves_last_record_is_valid() {
 
     let recovery_fired = Arc::new(AtomicBool::new(false));
     let recovery_clone = recovery_fired.clone();
-    let opts = ReaderOptions::new().recovery(move |_, _| {
+    let opts = ReaderOptions::new().recovery(move |_region| {
         recovery_clone.store(true, Ordering::SeqCst);
+        true
     });
 
     let mut reader = RecordReader::new(Cursor::new(raw), opts).expect("reader new");
