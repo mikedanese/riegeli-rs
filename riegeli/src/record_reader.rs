@@ -337,13 +337,10 @@ impl<R: Read + Seek> RecordReader<R> {
         let mut scan_pos = first_data_chunk;
 
         loop {
-            // Read block header if at boundary.
-            let actual_pos = self.skip_block_headers_at(scan_pos)?;
-            if actual_pos != scan_pos {
-                scan_pos = actual_pos;
-            }
-
-            // Try to read a chunk header.
+            // peek_chunk_header canonicalizes and skips block headers itself,
+            // so scan_pos stays a canonical chunk address. (Pre-skipping here
+            // would turn a boundary-coincident chunk's address into the
+            // boundary+24 alias and shift its numeric positions by 24.)
             match self.peek_chunk_header(scan_pos) {
                 Ok(None) => {
                     // EOF — seek to end.
@@ -372,7 +369,7 @@ impl<R: Read + Seek> RecordReader<R> {
 
                     // Advance to the next chunk.
                     let chunk_header_file_pos = scan_pos;
-                    scan_pos = advance_past_chunk(chunk_header_file_pos, data_size, num_records);
+                    scan_pos = crate::block_arithmetic::chunk_end(chunk_header_file_pos, data_size, num_records);
                 }
                 Err(e) => return Err(e),
             }
@@ -543,7 +540,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 chunks.push((chunk_begin, num_records));
             }
 
-            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
+            scan_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
         }
 
         Ok(chunks)
@@ -709,7 +706,7 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             // Advance past this chunk.
-            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
+            scan_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
         }
 
         // Restore state.
@@ -792,7 +789,7 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             // Advance past this chunk.
-            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
+            scan_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
         }
 
         Ok(())
@@ -850,7 +847,7 @@ impl<R: Read + Seek> RecordReader<R> {
             let num_records = ch.num_records();
 
             // Compute where the chunk data ends in the file (accounting for block headers).
-            let data_file_end = advance_past_chunk(data_start, data_size, num_records);
+            let data_file_end = crate::block_arithmetic::chunk_end(data_start, data_size, num_records);
 
             // Read the chunk data (skipping block headers).
             let chunk_data = self.read_chunk_data(data_begin, data_size)?;
@@ -934,10 +931,13 @@ impl<R: Read + Seek> RecordReader<R> {
         &mut self,
         pos: u64,
     ) -> Result<Option<(ChunkHeader, u64, u64)>, RiegeliError> {
-        let mut file_pos = pos;
+        // Canonicalize: a chunk whose header physically follows a block
+        // header is addressed AT the block boundary; the first-header-byte
+        // form (boundary + 24) is accepted as an alias of the same chunk.
+        let chunk_begin = crate::block_arithmetic::canonical_chunk_address(pos);
+        let mut file_pos = chunk_begin;
         let mut bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
         let mut filled: usize = 0;
-        let mut chunk_begin: Option<u64> = None;
 
         while filled < bytes.len() {
             if is_block_boundary(file_pos) {
@@ -956,10 +956,6 @@ impl<R: Read + Seek> RecordReader<R> {
                 }
                 file_pos += BLOCK_HEADER_SIZE;
             }
-            if chunk_begin.is_none() {
-                chunk_begin = Some(file_pos);
-            }
-
             let until_boundary = BLOCK_SIZE - (file_pos % BLOCK_SIZE);
             let to_read = ((bytes.len() - filled) as u64).min(until_boundary) as usize;
             self.reader.seek(SeekFrom::Start(file_pos))?;
@@ -972,7 +968,6 @@ impl<R: Read + Seek> RecordReader<R> {
             file_pos += to_read as u64;
         }
 
-        let chunk_begin = chunk_begin.expect("loop body ran at least once");
         Ok(Some((ChunkHeader::from_bytes(bytes), chunk_begin, file_pos)))
     }
 
@@ -1049,7 +1044,7 @@ impl<R: Read + Seek> RecordReader<R> {
 
         self.current_chunk_begin = data_start;
         self.current_record_index = 0;
-        self.next_chunk_file_pos = advance_past_chunk(data_start, data_size, ch.num_records());
+        self.next_chunk_file_pos = crate::block_arithmetic::chunk_end(data_start, data_size, ch.num_records());
 
         match ch.chunk_type() {
             Ok(ChunkType::Simple) => {
@@ -1081,38 +1076,6 @@ impl<R: Read + Seek> RecordReader<R> {
             .read_chunk_header_at(file_pos)?
             .map(|(ch, _, _)| ch))
     }
-
-    /// Skip block headers at `pos` and return the file position after them.
-    fn skip_block_headers_at(&mut self, pos: u64) -> Result<u64, RiegeliError> {
-        if is_block_boundary(pos) {
-            Ok(pos + BLOCK_HEADER_SIZE)
-        } else {
-            Ok(pos)
-        }
-    }
-}
-
-/// Compute the file position immediately after a chunk whose header is at `chunk_header_pos`
-/// and whose data is `data_size` bytes long (accounting for interleaved block headers).
-/// Compute the file position of the chunk following the one at `chunk_header_pos`.
-///
-/// Matches the C++ `ChunkEnd` formula exactly:
-///   max(
-///     AddWithOverhead(chunk_begin, header_size + data_size),
-///     RoundUpToPossibleChunkBoundary(chunk_begin + num_records)
-///   )
-///
-/// The second term accounts for the zero-padding that the C++ writer appends
-/// to every chunk so that each record occupies at least 1 file byte, enabling
-/// recovery scanning. Without it, the Rust reader would look for the next chunk
-/// header in the middle of the C++ padding and fail with a hash mismatch.
-fn advance_past_chunk(chunk_header_pos: u64, data_size: u64, num_records: u64) -> u64 {
-    let end_from_data =
-        crate::block_arithmetic::add_with_overhead(chunk_header_pos, CHUNK_HEADER_SIZE + data_size);
-    let end_from_records = crate::block_arithmetic::round_up_to_possible_chunk_boundary(
-        chunk_header_pos + num_records,
-    );
-    end_from_data.max(end_from_records)
 }
 
 /// Return the next block boundary strictly after `pos`.

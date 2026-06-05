@@ -505,12 +505,11 @@ impl<W: Write> RecordWriter<W> {
         // The second term ensures that each chunk occupies at least `num_records`
         // file bytes past its start position. This is required for recovery scanning:
         // the C++ reader enforces this invariant at `Close()` time.
-        let chunk_total_bytes = CHUNK_HEADER_SIZE + header.data_size();
-        let end_from_data = add_with_overhead(chunk_start, chunk_total_bytes);
-        let end_from_records = crate::block_arithmetic::round_up_to_possible_chunk_boundary(
-            chunk_start + header.num_records(),
+        let chunk_end_pos = crate::block_arithmetic::chunk_end(
+            chunk_start,
+            header.data_size(),
+            header.num_records(),
         );
-        let chunk_end_pos = end_from_data.max(end_from_records);
 
         // The bytes we need to write: chunk header bytes followed by data bytes.
         let header_bytes = header.to_bytes();
@@ -1030,6 +1029,159 @@ mod tests {
             }
             assert_eq!(count, n, "n={n}: record count mismatch");
         }
+    }
+
+    /// Spec tests for the C++ chunk-position convention: sweep
+    /// `chunk_begin + num_records` landing at boundary+δ for
+    /// δ ∈ {0, 1, 11, 24, 25, 26}, checking the writer's byte layout and that
+    /// the reader lands on the following chunk exactly.
+    ///
+    /// The record chunk begins at 64, so num_records = 131072 + δ - 64 puts
+    /// the round-up input at the second block boundary + δ. Expected chunk
+    /// ends (canonical addresses): δ=0 → the boundary itself; δ ∈ {1..24} →
+    /// boundary+25; δ=25 → boundary+25; δ=26 → boundary+26.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn chunk_position_convention_delta_sweep() {
+        let boundary: u64 = 131_072; // 2 * 65536
+
+        for (delta, expected_next_chunk) in [
+            (0u64, boundary),
+            (1, boundary + 25),
+            (11, boundary + 25),
+            (24, boundary + 25),
+            (25, boundary + 25),
+            (26, boundary + 26),
+        ] {
+            let n = (boundary + delta - 64) as usize;
+            let mut buf = Cursor::new(Vec::<u8>::new());
+            {
+                let mut w = RecordWriter::new(
+                    &mut buf,
+                    WriterOptions::new().compression(CompressionType::Zstd),
+                )
+                .expect("writer new ok");
+                for _ in 0..n {
+                    w.write_record(b"").expect("write ok");
+                }
+                w.flush().expect("flush ok");
+                w.write_record(b"marker").expect("write ok");
+                w.flush().expect("flush ok");
+            }
+            let data = buf.into_inner();
+
+            // Writer-side byte layout: the block header at the boundary.
+            let bh = crate::block_header::BlockHeader::from_bytes(
+                data[boundary as usize..boundary as usize + 24]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert!(bh.is_valid(), "delta={delta}: block header hash invalid");
+            if delta == 0 {
+                // The padded chunk ends AT the boundary; the marker chunk is
+                // boundary-coincident, so the block header belongs to it:
+                // previous_chunk = 0, header bytes at boundary+24.
+                assert_eq!(bh.previous_chunk(), 0, "delta=0 previous_chunk");
+            } else {
+                // The boundary falls inside the padded chunk (which began at
+                // 64): previous_chunk = boundary - 64, next_chunk = distance
+                // to the following chunk address.
+                assert_eq!(bh.previous_chunk(), boundary - 64, "delta={delta} previous_chunk");
+                assert_eq!(
+                    bh.next_chunk(),
+                    expected_next_chunk - boundary,
+                    "delta={delta} next_chunk"
+                );
+            }
+
+            // Reader-side: all records read, marker lands at the expected
+            // canonical chunk address, clean EOF.
+            let mut reader = crate::record_reader::RecordReader::new(
+                Cursor::new(data),
+                crate::record_reader::ReaderOptions::new(),
+            )
+            .expect("reader new ok");
+            let mut count = 0usize;
+            let mut marker_pos = None;
+            while let Some(rec) = reader.read_record().expect("read ok") {
+                count += 1;
+                if rec == b"marker" {
+                    marker_pos = Some(reader.last_pos());
+                }
+            }
+            assert_eq!(count, n + 1, "delta={delta}: record count");
+            let marker_pos = marker_pos.expect("marker record present");
+            assert_eq!(
+                marker_pos.chunk_begin, expected_next_chunk,
+                "delta={delta}: marker chunk address"
+            );
+
+            // Seek back to the marker by its RecordPosition.
+            reader.seek(marker_pos).expect("seek ok");
+            assert_eq!(
+                reader.read_record().expect("read after seek").as_deref(),
+                Some(&b"marker"[..]),
+                "delta={delta}: marker after seek"
+            );
+
+            // δ=0: the alias address (boundary + 24) must reach the same chunk.
+            if delta == 0 {
+                let alias = crate::record_position::RecordPosition::new(boundary + 24, 0);
+                reader.seek(alias).expect("alias seek ok");
+                assert_eq!(
+                    reader.read_record().expect("read after alias seek").as_deref(),
+                    Some(&b"marker"[..]),
+                    "delta=0: alias address must resolve to the same chunk"
+                );
+            }
+        }
+    }
+
+    /// Acceptance data point verified against the real C++
+    /// implementation: 131,019 empty records with zstd → record chunk at 64,
+    /// C++ pads to exactly 131097 (= 131072 + 25, since 64 + 131019 =
+    /// 131072 + 11); the next chunk header starts there; the block header at
+    /// 131072 carries previous_chunk = 131008 and next_chunk = 25.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn chunk_position_convention_cpp_acceptance_point() {
+        let n = 131_019usize;
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = RecordWriter::new(
+                &mut buf,
+                WriterOptions::new().compression(CompressionType::Zstd),
+            )
+            .expect("writer new ok");
+            for _ in 0..n {
+                w.write_record(b"").expect("write ok");
+            }
+            w.flush().expect("flush ok");
+            w.write_record(b"next").expect("write ok");
+            w.flush().expect("flush ok");
+        }
+        let data = buf.into_inner();
+
+        let bh = crate::block_header::BlockHeader::from_bytes(
+            data[131_072..131_096].try_into().unwrap(),
+        );
+        assert!(bh.is_valid());
+        assert_eq!(bh.previous_chunk(), 131_008);
+        assert_eq!(bh.next_chunk(), 25);
+
+        let mut reader = crate::record_reader::RecordReader::new(
+            Cursor::new(data),
+            crate::record_reader::ReaderOptions::new(),
+        )
+        .expect("reader new ok");
+        let mut count = 0usize;
+        let mut last_begin = 0;
+        while let Some(_) = reader.read_record().expect("read ok") {
+            count += 1;
+            last_begin = reader.last_pos().chunk_begin;
+        }
+        assert_eq!(count, n + 1);
+        assert_eq!(last_begin, 131_097, "next chunk header starts at 131097");
     }
 
     /// Same shape, but with a second chunk after the padded one: the next

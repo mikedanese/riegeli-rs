@@ -24,27 +24,60 @@ pub fn remaining_in_block(pos: u64) -> u64 {
     if offset == 0 { 0 } else { BLOCK_SIZE - offset }
 }
 
+/// The usable (non-block-header) bytes per block.
+pub const USABLE_BLOCK_SIZE: u64 = BLOCK_SIZE - BLOCK_HEADER_SIZE;
+
 /// Returns `true` if `pos` is a position where a chunk could legally start.
 ///
-/// A chunk boundary must be in the usable data region — at or after the block header
-/// within its block. Positions inside a block header (`pos % BLOCK_SIZE < BLOCK_HEADER_SIZE`)
-/// are not valid chunk boundaries.
+/// Mirrors the C++ `IsPossibleChunkBoundary`: a chunk position is valid when
+/// it is not inside nor immediately after a block header. Per block the valid
+/// offsets are `{0} ∪ {25..65535}`: a chunk whose header physically follows a
+/// block header is addressed AT the block boundary (offset 0), and offset 24
+/// — the first physical byte after the header — is excluded as an alias of
+/// that same position.
 pub fn is_possible_chunk_boundary(pos: u64) -> bool {
-    (pos % BLOCK_SIZE) >= BLOCK_HEADER_SIZE
+    remaining_in_block(pos) < USABLE_BLOCK_SIZE
 }
 
 /// Round `pos` up to the nearest position where a chunk could legally start.
 ///
-/// If `pos` is already a valid chunk boundary, it is returned unchanged.
-/// If `pos` is inside a block header, it is advanced to just after the header.
+/// Mirrors the C++ `RoundUpToPossibleChunkBoundary`:
+/// `pos + saturating_sub(remaining_in_block(pos), USABLE_BLOCK_SIZE - 1)`.
+/// A block boundary is returned unchanged (it is a valid chunk position);
+/// offsets 1..=24 advance to boundary + 25.
 pub fn round_up_to_possible_chunk_boundary(pos: u64) -> u64 {
-    let offset = pos % BLOCK_SIZE;
-    if offset >= BLOCK_HEADER_SIZE {
-        pos
+    pos + remaining_in_block(pos).saturating_sub(USABLE_BLOCK_SIZE - 1)
+}
+
+/// Canonicalize a chunk address: a chunk whose header physically follows a
+/// block header can be referred to either by the block boundary (canonical)
+/// or by the first header byte (boundary + 24, the alias). Positions are
+/// stored and compared in canonical form.
+pub fn canonical_chunk_address(pos: u64) -> u64 {
+    if pos % BLOCK_SIZE == BLOCK_HEADER_SIZE {
+        pos - BLOCK_HEADER_SIZE
     } else {
-        // Advance past the block header at the start of this block.
-        round_down_to_block_boundary(pos) + BLOCK_HEADER_SIZE
+        pos
     }
+}
+
+/// The file position immediately after a chunk that begins at `chunk_begin`
+/// with `data_size` data bytes and `num_records` records.
+///
+/// Mirrors the C++ `ChunkEnd` formula:
+/// `max(AddWithOverhead(begin, header_size + data_size),
+///      RoundUpToPossibleChunkBoundary(begin + num_records))`.
+///
+/// The second term accounts for the zero-padding the writer appends so every
+/// record occupies at least one file byte (enabling recovery scanning).
+/// `chunk_begin` may be given in either canonical or alias form; both
+/// addresses describe the same chunk and yield the same end position.
+pub fn chunk_end(chunk_begin: u64, data_size: u64, num_records: u64) -> u64 {
+    let begin = canonical_chunk_address(chunk_begin);
+    let end_from_data =
+        add_with_overhead(begin, crate::constants::CHUNK_HEADER_SIZE + data_size);
+    let end_from_records = round_up_to_possible_chunk_boundary(begin + num_records);
+    end_from_data.max(end_from_records)
 }
 
 /// Number of block-header bytes that still need to be laid down before `pos` reaches usable data.
@@ -168,24 +201,100 @@ mod tests {
 
     #[test]
     fn test_is_possible_chunk_boundary() {
-        // pos=0: inside block header (offset 0 < 24) — not a chunk boundary.
-        assert!(!is_possible_chunk_boundary(0));
+        // C++ convention: valid offsets per block are {0} ∪ {25..65535}.
+        // A block boundary IS a chunk position (the chunk's header bytes
+        // physically follow the block header); offsets 1..=24 are not —
+        // 1..=23 are inside the block header and 24 is the alias of the
+        // boundary address.
+        assert!(is_possible_chunk_boundary(0));
+        assert!(!is_possible_chunk_boundary(1));
         assert!(!is_possible_chunk_boundary(23));
-        assert!(is_possible_chunk_boundary(24));
+        assert!(!is_possible_chunk_boundary(24));
+        assert!(is_possible_chunk_boundary(25));
         assert!(is_possible_chunk_boundary(65535));
-        // pos=65536: block boundary (offset 0 < 24) — not a chunk boundary.
-        assert!(!is_possible_chunk_boundary(65536));
-        assert!(is_possible_chunk_boundary(65536 + 24));
+        assert!(is_possible_chunk_boundary(65536));
+        assert!(!is_possible_chunk_boundary(65536 + 24));
+        assert!(is_possible_chunk_boundary(65536 + 25));
     }
 
     #[test]
     fn test_round_up_to_possible_chunk_boundary() {
-        assert_eq!(round_up_to_possible_chunk_boundary(0), 24);
-        assert_eq!(round_up_to_possible_chunk_boundary(23), 24);
-        assert_eq!(round_up_to_possible_chunk_boundary(24), 24);
+        // A boundary is already valid; offsets 1..=24 advance to boundary+25.
+        assert_eq!(round_up_to_possible_chunk_boundary(0), 0);
+        assert_eq!(round_up_to_possible_chunk_boundary(1), 25);
+        assert_eq!(round_up_to_possible_chunk_boundary(23), 25);
+        assert_eq!(round_up_to_possible_chunk_boundary(24), 25);
+        assert_eq!(round_up_to_possible_chunk_boundary(25), 25);
         assert_eq!(round_up_to_possible_chunk_boundary(100), 100);
-        assert_eq!(round_up_to_possible_chunk_boundary(65536), 65536 + 24);
-        assert_eq!(round_up_to_possible_chunk_boundary(65536 + 24), 65536 + 24);
+        assert_eq!(round_up_to_possible_chunk_boundary(65536), 65536);
+        assert_eq!(round_up_to_possible_chunk_boundary(65536 + 1), 65536 + 25);
+        assert_eq!(round_up_to_possible_chunk_boundary(65536 + 24), 65536 + 25);
+        assert_eq!(round_up_to_possible_chunk_boundary(65536 + 25), 65536 + 25);
+        // Acceptance data point verified against the real C++ implementation:
+        // 64 + 131019 = 131072 + 11 → 131097.
+        assert_eq!(round_up_to_possible_chunk_boundary(131084), 131097);
+    }
+
+    #[test]
+    fn test_canonical_chunk_address() {
+        assert_eq!(canonical_chunk_address(0), 0);
+        assert_eq!(canonical_chunk_address(24), 0);
+        assert_eq!(canonical_chunk_address(25), 25);
+        assert_eq!(canonical_chunk_address(64), 64);
+        assert_eq!(canonical_chunk_address(65536), 65536);
+        assert_eq!(canonical_chunk_address(65536 + 24), 65536);
+        assert_eq!(canonical_chunk_address(65536 + 25), 65536 + 25);
+    }
+
+    #[test]
+    fn test_chunk_end_equal_addressing_invariant() {
+        // chunk_end(boundary, ...) == chunk_end(boundary + 24, ...) — both
+        // addresses describe the same chunk.
+        for (data_size, num_records) in
+            [(0u64, 0u64), (53, 131019), (100, 1), (70_000, 3), (10, 70_000)]
+        {
+            for boundary in [0u64, 65536, 131072] {
+                assert_eq!(
+                    chunk_end(boundary, data_size, num_records),
+                    chunk_end(boundary + 24, data_size, num_records),
+                    "boundary={boundary} data_size={data_size} num_records={num_records}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunk_end_acceptance_points() {
+        // The signature chunk: begins at 0 (canonical), 40-byte header,
+        // no data, no records → ends at 64.
+        assert_eq!(chunk_end(0, 0, 0), 64);
+        // 131k-empties zstd repro verified against C++:
+        // record chunk at 64, data_size=53, num_records=131019 → 131097.
+        assert_eq!(chunk_end(64, 53, 131019), 131097);
+    }
+
+    #[test]
+    fn test_add_with_overhead_matches_cpp_closed_form() {
+        // The C++ AddWithOverhead is a closed form; ours walks positions.
+        // They must agree for every canonical chunk_begin.
+        fn cpp_add_with_overhead(chunk_begin: u64, length: u64) -> u64 {
+            let usable = BLOCK_SIZE - BLOCK_HEADER_SIZE;
+            let num_overhead_blocks =
+                (length + (chunk_begin + usable - 1) % BLOCK_SIZE) / usable;
+            chunk_begin + length + num_overhead_blocks * BLOCK_HEADER_SIZE
+        }
+        let begins = [0u64, 25, 64, 1000, 65535, 65536, 65536 + 25, 131072, 131097];
+        let lengths = [0u64, 1, 40, 93, 65471, 65472, 65473, 65512, 65513, 131024, 200_000];
+        for &b in &begins {
+            assert!(is_possible_chunk_boundary(b), "test input {b} not canonical");
+            for &l in &lengths {
+                assert_eq!(
+                    add_with_overhead(b, l),
+                    cpp_add_with_overhead(b, l),
+                    "begin={b} len={l}"
+                );
+            }
+        }
     }
 
     #[test]
