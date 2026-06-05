@@ -8,7 +8,26 @@ repository = "https://github.com/mikedanese/riegeli-rs"
 readme = "../README.md"
 keywords = ["riegeli", "records", "protobuf", "serialization"]
 categories = ["encoding", "compression"]
-exclude = ["testdata/"]
+# tests/ entries: these exercise the C++ reference through riegeli-ffi, a
+# path dev-dependency that cargo strips on publish — they cannot compile in
+# the published crate, so they are excluded from it. (benches/head_to_head.rs
+# also uses the ffi but cannot be excluded: its explicit [[bench]] target
+# would dangle. It stays in the package; `cargo bench` is only expected to
+# work from the repository checkout.)
+exclude = [
+    "testdata/",
+    # conformance.rs include_bytes!-es testdata/, which is excluded above, so
+    # it cannot compile in the published crate either.
+    "tests/conformance.rs",
+    "tests/common/",
+    "tests/benchmark_correctness.rs",
+    "tests/cross_lang_roundtrip.rs",
+    "tests/proto_streaming.rs",
+    "tests/recovery.rs",
+    "tests/sprint_29_eval.rs",
+    "tests/transpose_adversarial.rs",
+    "tests/transpose_roundtrip.rs",
+]
 
 [dependencies]
 highway = { workspace = true }
