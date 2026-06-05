@@ -1575,16 +1575,23 @@ mod tests {
 
     /// Returns true if any chunk in the file has a header straddling a block
     /// boundary (header begins within 40 bytes below a 64 KiB multiple).
+    ///
+    /// Detected by direct inspection of the raw block-header bytes the
+    /// writer emitted — deliberately NOT via the reader under test, whose
+    /// position bookkeeping is part of what the straddle tests exercise.
+    /// The block header at a boundary stores the distance back to the start
+    /// of the chunk in progress there; a 40-byte chunk header straddles the
+    /// boundary iff that distance is in (0, 40).
     fn has_straddling_chunk_header(data: &[u8]) -> bool {
-        let mut reader = RecordReader::new(Cursor::new(data.to_vec()), ReaderOptions::new())
-            .expect("reader new ok");
+        let block = BLOCK_SIZE as usize;
+        let mut boundary = block;
         let mut straddles = false;
-        while let Some(_) = reader.read_record().expect("read ok") {
-            let begin = reader.last_pos().chunk_begin;
-            let offset = begin % BLOCK_SIZE;
-            if offset > BLOCK_SIZE - 40 {
+        while boundary + BLOCK_HEADER_SIZE as usize <= data.len() {
+            let prev = u64::from_le_bytes(data[boundary + 8..boundary + 16].try_into().unwrap());
+            if 0 < prev && prev < CHUNK_HEADER_SIZE {
                 straddles = true;
             }
+            boundary += block;
         }
         straddles
     }
@@ -1609,6 +1616,13 @@ mod tests {
             let mut count = 0;
             while let Some(rec) = reader.read_record().expect("read ok") {
                 assert_eq!(rec.len(), rec_size, "rec_size={rec_size} record {count}");
+                // The fill byte identifies the record, so a read that comes
+                // back the right length but from the wrong place still fails.
+                let fill = (count % 251) as u8;
+                assert!(
+                    rec.iter().all(|&b| b == fill),
+                    "rec_size={rec_size} record {count}: content mismatch"
+                );
                 count += 1;
             }
             assert_eq!(count, n, "rec_size={rec_size}: wrong record count");
