@@ -1,6 +1,6 @@
 //! Integration tests for WriterOptions tuning: chunk size, bucket fraction, compression level.
 
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{Cursor, Write};
 
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, RiegeliError, WriterOptions};
 
@@ -207,11 +207,6 @@ fn criterion_15_7_final_padding_aligns_after_flush() {
             Ok(())
         }
     }
-    impl Seek for SharedVec {
-        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-            Ok(self.0.lock().unwrap().len() as u64)
-        }
-    }
 
     const ALIGNMENT: u64 = 65536;
 
@@ -277,11 +272,6 @@ fn criterion_15_8_window_log_with_none_compression_is_error() {
             Ok(())
         }
     }
-    impl Seek for NullWriter {
-        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-            Ok(0)
-        }
-    }
 
     let result: Result<RecordWriter<NullWriter>, RiegeliError> =
         RecordWriter::new(NullWriter, opts);
@@ -312,11 +302,6 @@ fn criterion_15_8_window_log_with_snappy_is_error() {
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-    impl Seek for NullWriter {
-        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-            Ok(0)
         }
     }
 

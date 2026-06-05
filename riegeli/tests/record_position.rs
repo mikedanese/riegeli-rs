@@ -62,11 +62,6 @@ fn adv_15_window_log_accepted_for_brotli_and_zstd() {
             Ok(())
         }
     }
-    impl Seek for NullSink {
-        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-            Ok(0)
-        }
-    }
 
     // Brotli with window_log — must succeed
     let result = RecordWriter::new(
