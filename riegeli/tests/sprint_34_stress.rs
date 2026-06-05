@@ -238,6 +238,7 @@ fn stress_10k_wide_narrow_projection() {
 
 /// 34.5 variant: 10,000 wide records with Zstd compression.
 #[test]
+#[cfg(feature = "zstd")]
 fn stress_10k_wide_narrow_projection_zstd() {
     const N: usize = 10_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();

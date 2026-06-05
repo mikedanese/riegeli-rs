@@ -1,5 +1,11 @@
 //! Conformance tests: Rust-written files are readable by C++ and vice versa.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, WriterOptions};
 use std::io::Cursor;
 

@@ -31,16 +31,18 @@ proptest = { workspace = true }
 criterion = { workspace = true }
 pprof = { workspace = true }
 riegeli-ffi = { path = "../riegeli-ffi" }
-riegeli = { path = ".", features = ["brotli", "zstd", "snappy"] }
 
 [[bench]]
 name = "throughput"
 harness = false
+required-features = ["brotli", "zstd"]
 
 [[bench]]
 name = "head_to_head"
 harness = false
+required-features = ["brotli", "zstd"]
 
 [[bench]]
 name = "transpose_projection_bench"
 harness = false
+required-features = ["brotli", "zstd"]

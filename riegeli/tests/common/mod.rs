@@ -21,6 +21,10 @@ pub fn make_small_records(n: usize) -> Vec<Vec<u8>> {
 }
 
 /// Generate `n` records of exactly `size` bytes filled with repeating `(i % 256) as u8`.
+#[cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(dead_code)
+)]
 pub fn make_large_records(n: usize, size: usize) -> Vec<Vec<u8>> {
     (0..n).map(|i| vec![(i % 256) as u8; size]).collect()
 }

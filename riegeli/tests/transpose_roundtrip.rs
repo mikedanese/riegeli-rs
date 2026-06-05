@@ -1,5 +1,11 @@
 //! Integration tests for transpose encoding write+read roundtrips.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 mod common;
 
 use common::{
@@ -36,6 +42,7 @@ fn make_non_proto_records(n: usize) -> Vec<Vec<u8>> {
 
 /// Generate mixed-size records cycling through: empty, 1-byte, 100-byte,
 /// 1 KiB, and 10 KiB. Produces `n` records total.
+#[cfg(feature = "zstd")]
 fn make_mixed_size_records(n: usize) -> Vec<Vec<u8>> {
     let sizes = [0usize, 1, 100, 1024, 10240];
     (0..n)
@@ -96,6 +103,7 @@ fn criterion_21_1b_cpp_write_transpose_none_100_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_2a_rust_write_transpose_brotli6_100_cpp_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
@@ -114,6 +122,7 @@ fn criterion_21_2a_rust_write_transpose_brotli6_100_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_2b_cpp_write_transpose_brotli6_100_rust_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
@@ -136,6 +145,7 @@ fn criterion_21_2b_cpp_write_transpose_brotli6_100_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_21_3a_rust_write_transpose_zstd3_100_cpp_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
@@ -154,6 +164,7 @@ fn criterion_21_3a_rust_write_transpose_zstd3_100_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_21_3b_cpp_write_transpose_zstd3_100_rust_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
@@ -176,6 +187,7 @@ fn criterion_21_3b_cpp_write_transpose_zstd3_100_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_4a_rust_write_transpose_brotli6_10k_cpp_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
@@ -194,6 +206,7 @@ fn criterion_21_4a_rust_write_transpose_brotli6_10k_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_4b_cpp_write_transpose_brotli6_10k_rust_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
@@ -216,6 +229,7 @@ fn criterion_21_4b_cpp_write_transpose_brotli6_10k_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_21_5a_rust_write_transpose_zstd3_mixed_cpp_read() {
     // 100 records cycling through empty, 1-byte, 100-byte, 1 KiB, 10 KiB
     let records = make_mixed_size_records(100);
@@ -235,6 +249,7 @@ fn criterion_21_5a_rust_write_transpose_zstd3_mixed_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn criterion_21_5b_cpp_write_transpose_zstd3_mixed_rust_read() {
     let records = make_mixed_size_records(100);
     cross_lang_roundtrip(
@@ -333,6 +348,7 @@ fn criterion_21_6d_cpp_write_transpose_none_two_records_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_7a_rust_write_transpose_brotli_small_chunks_cpp_read() {
     let records = make_small_records(500);
     cross_lang_roundtrip(
@@ -352,6 +368,7 @@ fn criterion_21_7a_rust_write_transpose_brotli_small_chunks_cpp_read() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn criterion_21_7b_cpp_write_transpose_brotli_small_chunks_rust_read() {
     let records = make_small_records(500);
     cross_lang_roundtrip(

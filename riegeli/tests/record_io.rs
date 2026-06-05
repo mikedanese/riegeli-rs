@@ -1,5 +1,11 @@
 //! Integration tests for RecordWriter and RecordReader: flush, empty records, multi-block files.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use riegeli::{CompressionType, ReaderOptions, RecordReader, RecordWriter, WriterOptions};
 
 use std::io::{Cursor, Seek, SeekFrom, Write};

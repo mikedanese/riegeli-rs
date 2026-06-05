@@ -1,5 +1,11 @@
 //! Integration tests for RecordPosition, seek, and error recovery.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, RiegeliError, WriterOptions};
@@ -11,6 +17,7 @@ use riegeli::CompressionType;
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "brotli")]
 fn write_and_roundtrip(
     records: &[&[u8]],
     options: WriterOptions,

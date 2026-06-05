@@ -1235,6 +1235,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    #[cfg(feature = "brotli")]
     use crate::compression::CompressionType;
     use crate::record_writer::{RecordWriter, WriterOptions};
 

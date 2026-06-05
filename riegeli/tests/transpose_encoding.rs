@@ -54,6 +54,7 @@ fn writer_reader_roundtrip(records: &[Vec<u8>], opts: WriterOptions) -> Vec<Vec<
 
 /// Multi-block with Brotli compression -- verify records are readable.
 #[test]
+#[cfg(feature = "brotli")]
 fn eval_13_6_multi_block_brotli() {
     // Each record is 128 bytes. 1000 records should exceed 64 KiB.
     let mut records: Vec<Vec<u8>> = Vec::new();
@@ -110,6 +111,7 @@ fn eval_13_6_multi_block_brotli() {
 
 /// A mix of proto, nonproto, empty, and large records through RecordWriter.
 #[test]
+#[cfg(feature = "brotli")]
 fn eval_13_8_writer_reader_diverse_records() {
     let mut records: Vec<Vec<u8>> = Vec::new();
     // Proto records
@@ -160,6 +162,7 @@ fn eval_13_8_writer_reader_transpose_none() {
 
 /// Records with fixed32 and fixed64 fields through writer/reader.
 #[test]
+#[cfg(feature = "brotli")]
 fn eval_13_8_writer_reader_fixed_fields() {
     let mut records: Vec<Vec<u8>> = Vec::new();
     for i in 0u32..200 {
@@ -188,6 +191,7 @@ fn eval_13_8_writer_reader_fixed_fields() {
 
 /// Seek after reading some records in a transpose file.
 #[test]
+#[cfg(feature = "brotli")]
 fn eval_13_8_writer_reader_seek_transpose() {
     let records: Vec<Vec<u8>> = (0..100)
         .map(|i| make_proto_3_varints(i, i * 2, i * 3))

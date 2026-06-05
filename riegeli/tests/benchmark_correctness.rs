@@ -117,6 +117,7 @@ fn roundtrip_simple_none() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn roundtrip_simple_brotli() {
     let records = make_payload(100, 100);
     rust_write_read_roundtrip(
@@ -132,6 +133,7 @@ fn roundtrip_simple_brotli() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn roundtrip_simple_zstd() {
     let records = make_payload(100, 100);
     rust_write_read_roundtrip(
@@ -164,6 +166,7 @@ fn roundtrip_transpose_none() {
 }
 
 #[test]
+#[cfg(feature = "brotli")]
 fn roundtrip_transpose_brotli() {
     let records = make_payload(100, 100);
     rust_write_read_roundtrip(
@@ -182,6 +185,7 @@ fn roundtrip_transpose_brotli() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
 fn roundtrip_transpose_zstd() {
     let records = make_payload(100, 100);
     rust_write_read_roundtrip(
@@ -201,6 +205,7 @@ fn roundtrip_transpose_zstd() {
 
 // ---- Compression ratio agreement between Rust and C++ ----
 
+#[cfg(all(feature = "brotli", feature = "zstd"))]
 fn compression_ratio_check(
     rust_opts: WriterOptions,
     ffi_opts: FfiWriterOptions,
@@ -241,6 +246,7 @@ fn compression_ratio_check(
 }
 
 #[test]
+#[cfg(all(feature = "brotli", feature = "zstd"))]
 fn compression_ratio_agreement_all_configs_small() {
     let records = make_payload(1000, 100);
     compression_ratio_check(
@@ -268,6 +274,7 @@ fn compression_ratio_agreement_all_configs_small() {
 }
 
 #[test]
+#[cfg(all(feature = "brotli", feature = "zstd"))]
 fn compression_ratio_agreement_all_configs_large() {
     let records = make_payload(100, 10_240);
     compression_ratio_check(

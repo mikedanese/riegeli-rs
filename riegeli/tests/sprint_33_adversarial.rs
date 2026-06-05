@@ -256,6 +256,7 @@ fn adversarial_existence_only_with_excluded_fields() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "brotli")]
 fn adversarial_full_projection_brotli_byte_identical() {
     let records: Vec<Vec<u8>> = (0..30u64)
         .map(|i| {
@@ -474,6 +475,7 @@ fn adversarial_existence_only_fixed_consumes_buffer() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "zstd")]
 fn adversarial_existence_only_zstd() {
     let records: Vec<Vec<u8>> = (0..20u64)
         .map(|i| {

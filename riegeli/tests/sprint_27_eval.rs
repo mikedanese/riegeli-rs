@@ -2,6 +2,12 @@
 //!
 //! Written by the Evaluator to probe edge cases the Generator's tests may miss.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

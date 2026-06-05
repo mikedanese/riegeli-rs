@@ -4,7 +4,6 @@ use std::io::{Cursor, Seek, SeekFrom, Write};
 
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, RiegeliError, WriterOptions};
 
-#[cfg(any(feature = "brotli", feature = "zstd"))]
 use riegeli::CompressionType;
 
 // ---------------------------------------------------------------------------

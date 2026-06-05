@@ -2367,6 +2367,7 @@ mod tests {
 
     /// 13.4: Multi-bucket with brotli.
     #[test]
+    #[cfg(feature = "brotli")]
     fn criterion_13_4_multi_bucket_with_brotli() {
         let records: Vec<Vec<u8>> = (0..100)
             .map(|i| make_proto_3_varints_int(i, i + 100, i + 200))
@@ -2427,6 +2428,7 @@ mod tests {
 
     /// 13.5: Transpose+Brotli is smaller than simple+Brotli for structured data.
     #[test]
+    #[cfg(feature = "brotli")]
     fn criterion_13_5_transpose_brotli_smaller_than_simple_brotli() {
         use crate::simple_chunk::SimpleChunkEncoder;
         let records: Vec<Vec<u8>> = (0..10_000)
@@ -2513,6 +2515,7 @@ mod tests {
     // Sprint 13 eval internal tests (moved from sprint_13_eval_adversarial.rs)
     // -------------------------------------------------------------------------
 
+    #[cfg(feature = "brotli")]
     fn simple_hash_int(seed: u64, len: usize) -> Vec<u8> {
         let mut result = Vec::with_capacity(len);
         let mut state = seed
@@ -2529,6 +2532,7 @@ mod tests {
 
     /// eval 13.1: varint32 overflow regression case.
     #[test]
+    #[cfg(all(feature = "brotli", feature = "zstd"))]
     fn eval_13_1_varint32_overflow_regression() {
         let record = vec![0xF8, 0x80, 0x80, 0x80, 0x10, 0x00];
         for compression in [
@@ -2579,6 +2583,7 @@ mod tests {
 
     /// eval 13.4: Multi-bucket with Zstd.
     #[test]
+    #[cfg(feature = "zstd")]
     fn eval_13_4_multi_bucket_zstd() {
         let records: Vec<Vec<u8>> = (0..100)
             .map(|i| make_proto_3_varints_int(i, i + 50, i + 100))
@@ -2592,6 +2597,7 @@ mod tests {
 
     /// eval 13.4: Multi-bucket with wide record.
     #[test]
+    #[cfg(feature = "brotli")]
     fn eval_13_4_multi_bucket_wide_record() {
         let mut rec = Vec::new();
         for field_num in 1..=100u32 {
@@ -2618,6 +2624,7 @@ mod tests {
 
     /// eval 13.4: Multi-bucket through encoder with various bucket sizes.
     #[test]
+    #[cfg(feature = "brotli")]
     fn eval_13_4_multi_bucket_through_writer_reader() {
         let records: Vec<Vec<u8>> = (0..300)
             .map(|i| make_proto_3_varints_int(i, i * 3, i * 7))
@@ -2651,6 +2658,7 @@ mod tests {
 
     /// eval 13.5: Transpose+Zstd vs simple+Zstd for structured data.
     #[test]
+    #[cfg(feature = "zstd")]
     fn eval_13_5_transpose_zstd_vs_simple_zstd() {
         use crate::simple_chunk::SimpleChunkEncoder;
         let records: Vec<Vec<u8>> = (0..10_000)
@@ -2719,6 +2727,7 @@ mod tests {
 
     /// eval 13.6: Multi-block with Brotli — block headers valid.
     #[test]
+    #[cfg(feature = "brotli")]
     fn eval_13_6_multi_block_brotli_block_headers_valid() {
         use crate::block_header::BlockHeader;
         use crate::compression::CompressionType;

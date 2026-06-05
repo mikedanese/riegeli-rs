@@ -414,6 +414,7 @@ fn adv34_mixed_inclusion_types_10k() {
 /// Brotli compression + narrow projection at volume. Tests lazy bucket
 /// decompression under realistic compression.
 #[test]
+#[cfg(feature = "brotli")]
 fn adv34_brotli_narrow_projection_10k() {
     const N: usize = 10_000;
     let mut records = Vec::new();

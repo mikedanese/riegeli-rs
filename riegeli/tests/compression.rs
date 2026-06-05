@@ -1,5 +1,11 @@
 //! Integration tests for all compression codecs (Brotli, Zstd, Snappy) via RecordWriter/RecordReader.
 
+// Some imports are used only by feature-gated tests; in reduced-feature
+// builds they would otherwise trip unused_imports.
+#![cfg_attr(
+    not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
+    allow(unused_imports)
+)]
 use std::cell::RefCell;
 use std::io::Cursor;
 use std::rc::Rc;

@@ -1318,7 +1318,6 @@ dependencies = [
  "proptest",
  "protobuf 4.34.1-release",
  "protobuf-codegen 4.34.1-release",
- "riegeli",
  "riegeli-ffi",
  "snap",
  "zstd",
