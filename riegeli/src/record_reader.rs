@@ -295,7 +295,9 @@ impl<R: Read + Seek> RecordReader<R> {
             Ok(None) => {
                 self.at_eof = true;
                 self.pos = pos;
-                self.last_pos = pos;
+                // last_pos deliberately NOT updated: it tracks the last
+                // successfully READ record (seek_back's target), and a seek
+                // reads nothing.
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -319,7 +321,7 @@ impl<R: Read + Seek> RecordReader<R> {
         }
 
         self.pos = pos;
-        self.last_pos = pos;
+        // last_pos deliberately NOT updated — see the EOF arm above.
         Ok(())
     }
 
@@ -348,7 +350,7 @@ impl<R: Read + Seek> RecordReader<R> {
                     // EOF — seek to end.
                     self.at_eof = true;
                     self.pos = RecordPosition::new(scan_pos, 0);
-                    self.last_pos = self.pos;
+                    // last_pos keeps the last successfully read record.
                     self.current_decoder = None;
                     return Ok(());
                 }
@@ -538,10 +540,16 @@ impl<R: Read + Seek> RecordReader<R> {
             let data_size = ch.data_size();
             let num_records = ch.num_records();
 
-            if matches!(
-                ch.chunk_type(),
-                Ok(ChunkType::Simple) | Ok(ChunkType::Transposed)
-            ) {
+            // Zero-record chunks cannot serve as search pivots: probing one
+            // via read_record_at falls through to the NEXT chunk's first
+            // record, so the comparator sees a misattributed record and the
+            // search can report a present target as absent.
+            if num_records > 0
+                && matches!(
+                    ch.chunk_type(),
+                    Ok(ChunkType::Simple) | Ok(ChunkType::Transposed)
+                )
+            {
                 chunks.push((chunk_begin, num_records));
             }
 
@@ -562,8 +570,11 @@ impl<R: Read + Seek> RecordReader<R> {
         let target = crate::record_position::RecordPosition::new(chunk_pos, record_index);
         self.seek(target)?;
         match self.read_record()? {
-            Some(rec) => Ok(rec),
-            None => Ok(Vec::new()),
+            // Guard against misattribution: if the read fell through to a
+            // different chunk (e.g. the requested chunk had no records),
+            // report absence rather than another chunk's record.
+            Some(rec) if self.current_chunk_begin == chunk_pos => Ok(rec),
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -1098,6 +1109,8 @@ impl<R: Read + Seek> RecordReader<R> {
     ///
     /// Returns `Ok(None)` at EOF.
     fn load_chunk_at(&mut self, file_pos: u64) -> Result<Option<ActiveDecoder>, RiegeliError> {
+        let mut file_pos = file_pos;
+        loop {
         // Read the chunk header (skipping leading and interleaved block headers).
         let (ch, chunk_begin, data_begin) = match self.read_chunk_header_at(file_pos)? {
             Some(v) => v,
@@ -1135,7 +1148,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 };
                 let decoder = SimpleChunkDecoder::new(chunk)?;
                 self.next_chunk_file_pos = chunk_end_pos;
-                Ok(Some(ActiveDecoder::Simple(decoder)))
+                return Ok(Some(ActiveDecoder::Simple(decoder)));
             }
             Ok(ChunkType::Transposed) => {
                 let chunk = Chunk {
@@ -1147,12 +1160,21 @@ impl<R: Read + Seek> RecordReader<R> {
                     self.field_projection.as_ref(),
                 )?;
                 self.next_chunk_file_pos = chunk_end_pos;
-                Ok(Some(ActiveDecoder::Transposed(decoder)))
+                return Ok(Some(ActiveDecoder::Transposed(decoder)));
             }
             _ => {
+                // A non-data chunk (signature, metadata, padding) is not
+                // EOF: scan forward to the next data chunk, the same way
+                // seek_numeric does. Conflating the two wedged the reader
+                // at EOF for every read after a seek to such an address.
+                // Iterative on purpose: a long run of tiny padding chunks
+                // must cost O(file size) scanning, not a stack frame per
+                // chunk (a crafted 2 MB padding run overflowed the stack
+                // when this was recursive).
                 self.next_chunk_file_pos = chunk_end_pos;
-                Ok(None)
+                file_pos = chunk_end_pos;
             }
+        }
         }
     }
 
@@ -1857,6 +1879,153 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Seeking to a non-data chunk's address (here: the signature chunk of
+    /// a concatenated second file) must scan forward to the next data chunk
+    /// — it used to wedge the reader at EOF, hiding all following records.
+    #[test]
+    fn seek_to_non_data_chunk_scans_forward() {
+        let mut data =
+            write_records(&[b"a"], WriterOptions::new().final_padding(BLOCK_SIZE));
+        assert_eq!(data.len() as u64, BLOCK_SIZE);
+        let second = write_records(&[b"b"], WriterOptions::new());
+        data.extend_from_slice(&second);
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        // The concatenated file's signature chunk is addressed at the block
+        // boundary — a non-data chunk.
+        reader
+            .seek(RecordPosition::new(BLOCK_SIZE, 0))
+            .expect("seek ok");
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"b"[..]),
+            "seek to a non-data chunk must land on the next data chunk, not EOF"
+        );
+    }
+
+    /// A long run of consecutive tiny padding chunks must be scanned
+    /// iteratively: the forward scan over non-data chunks used to recurse
+    /// once per chunk, and a crafted ~2 MB padding run overflowed the
+    /// stack (SIGABRT). With the loop this completes in milliseconds.
+    #[test]
+    fn seek_across_long_padding_run_does_not_overflow_stack() {
+        fn padding_run_file(n: usize) -> Vec<u8> {
+            let mut file = write_records(&[], WriterOptions::new());
+            assert_eq!(file.len() as u64, BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE);
+            let header =
+                crate::chunk_header::ChunkHeader::from_parts(&[], ChunkType::Padding, 0, 0)
+                    .to_bytes();
+            for _ in 0..n {
+                let chunk_begin =
+                    crate::block_arithmetic::canonical_chunk_address(file.len() as u64);
+                let chunk_end = crate::block_arithmetic::chunk_end(chunk_begin, 0, 0);
+                let mut i = 0usize;
+                while i < header.len() {
+                    let pos = file.len() as u64;
+                    if pos % BLOCK_SIZE == 0 {
+                        let bh = crate::block_header::BlockHeader::from_parts(
+                            pos - chunk_begin,
+                            chunk_end - pos,
+                        );
+                        file.extend_from_slice(&bh.to_bytes());
+                        continue;
+                    }
+                    let until = (BLOCK_SIZE - pos % BLOCK_SIZE) as usize;
+                    let take = until.min(header.len() - i);
+                    file.extend_from_slice(&header[i..i + take]);
+                    i += take;
+                }
+            }
+            file
+        }
+
+        let data = padding_run_file(50_000);
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        reader
+            .seek(RecordPosition::new(
+                BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE,
+                0,
+            ))
+            .expect("seek across the padding run must not crash");
+        assert_eq!(reader.read_record().expect("read ok"), None, "clean EOF");
+    }
+
+    /// Zero-record data chunks must not serve as binary-search pivots:
+    /// probing one falls through to the NEXT chunk's record, corrupting
+    /// pivot decisions (a present target could be reported absent).
+    #[test]
+    fn search_skips_zero_record_chunks() {
+        /// A valid empty Simple chunk: zero records, uncompressed, empty
+        /// sizes section.
+        fn empty_simple_chunk() -> Vec<u8> {
+            let data = [0x00u8, 0x00]; // compression none, sizes_byte_len 0
+            let data_hash = crate::hash::highway_hash_64(&data);
+            let chunk_type_and_num_records: u64 = ChunkType::Simple as u8 as u64; // 0 records
+            let mut body = [0u8; 32];
+            body[0..8].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            body[8..16].copy_from_slice(&data_hash.to_le_bytes());
+            body[16..24].copy_from_slice(&chunk_type_and_num_records.to_le_bytes());
+            body[24..32].copy_from_slice(&0u64.to_le_bytes());
+            let header_hash = crate::hash::highway_hash_64(&body);
+            let mut out = Vec::with_capacity(42);
+            out.extend_from_slice(&header_hash.to_le_bytes());
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&data);
+            out
+        }
+
+        // Convergence layout: the target lives in the LAST real chunk and a
+        // trailing empty chunk becomes the final pivot — probing it at EOF
+        // yields an empty record, the comparator steers into the empty
+        // chunk, and the within-chunk search reports the target absent.
+        let mut data = write_records(&[b"a", b"m"], WriterOptions::new());
+        data.extend_from_slice(&empty_simple_chunk());
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        let found = reader
+            .search(|rec| rec.cmp(&b"m"[..]))
+            .expect("search ok");
+        assert!(found, "present record must be found despite an empty pivot chunk");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"m"[..]));
+    }
+
+    /// seek() must not clobber last_pos — it tracks the last successfully
+    /// READ record, and seek_back() is documented to return there.
+    #[test]
+    fn seek_back_returns_to_last_read_record_not_seek_target() {
+        let data = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+        let second_pos = {
+            // Find the second record's position by reading it, then rewind.
+            let p = reader.pos();
+            assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"second"[..]));
+            let sp = reader.last_pos();
+            // Restore: last read should again be "first" for the real test.
+            reader.seek(p).expect("seek ok");
+            sp
+        };
+
+        // Fresh reader: read "first", then seek AWAY to second's position
+        // without reading, then seek_back — must land on "first".
+        let data2 = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        let mut reader2 =
+            RecordReader::new(Cursor::new(data2), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader2.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+        reader2.seek(second_pos).expect("seek ok");
+        assert!(reader2.seek_back().expect("seek_back ok"));
+        assert_eq!(
+            reader2.read_record().expect("read ok").as_deref(),
+            Some(&b"first"[..]),
+            "seek_back must return to the last READ record, not the last seek target"
+        );
     }
 
     /// Decoder-construction failures (malformed chunk interior behind valid
