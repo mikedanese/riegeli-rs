@@ -421,8 +421,9 @@ impl<R: Read + Seek> RecordReader<R> {
             return Ok(None);
         }
 
-        // Read the chunk data.
-        let data = self.read_chunk_data(metadata_chunk_pos, ch.data_size())?;
+        // Read the chunk data. The metadata chunk header is at offset 64, far
+        // from any block boundary, so its data always begins at 64 + 40.
+        let data = self.read_chunk_data(metadata_chunk_pos + CHUNK_HEADER_SIZE, ch.data_size())?;
 
         // Validate data hash.
         if !ch.is_data_valid(&data) {
@@ -524,32 +525,11 @@ impl<R: Read + Seek> RecordReader<R> {
         let mut scan_pos = first_data_chunk;
         let mut chunks = Vec::new();
 
-        loop {
-            // Handle block boundary.
-            if is_block_boundary(scan_pos) {
-                self.reader.seek(SeekFrom::Start(scan_pos))?;
-                let mut bh_bytes = [0u8; 24];
-                match self.reader.read_exact(&mut bh_bytes) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => return Err(e.into()),
-                }
-                scan_pos += BLOCK_HEADER_SIZE;
-            }
-
-            // Read chunk header.
-            self.reader.seek(SeekFrom::Start(scan_pos))?;
-            let mut ch_bytes = [0u8; 40];
-            match self.reader.read_exact(&mut ch_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            let ch = ChunkHeader::from_bytes(ch_bytes);
+        // Read chunk headers until EOF (skipping leading and interleaved block headers).
+        while let Some((ch, chunk_begin, _)) = self.read_chunk_header_at(scan_pos)? {
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
-                    "invalid chunk header at {scan_pos} during search scan"
+                    "invalid chunk header at {chunk_begin} during search scan"
                 ).into()));
             }
 
@@ -560,10 +540,10 @@ impl<R: Read + Seek> RecordReader<R> {
                 ch.chunk_type(),
                 Ok(ChunkType::Simple) | Ok(ChunkType::Transposed)
             ) {
-                chunks.push((scan_pos, num_records));
+                chunks.push((chunk_begin, num_records));
             }
 
-            scan_pos = advance_past_chunk(scan_pos, data_size, num_records);
+            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
         }
 
         Ok(chunks)
@@ -685,51 +665,10 @@ impl<R: Read + Seek> RecordReader<R> {
         let mut total_records: u64 = 0;
 
         loop {
-            // Handle block boundary.
-            if is_block_boundary(scan_pos) {
-                // Skip the block header.
-                self.reader.seek(SeekFrom::Start(scan_pos))?;
-                let mut bh_bytes = [0u8; 24];
-                match self.reader.read_exact(&mut bh_bytes) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => {
-                        self.restore_state(
-                            saved_pos,
-                            saved_last_pos,
-                            saved_next_chunk_file_pos,
-                            saved_current_chunk_begin,
-                            saved_current_record_index,
-                            saved_at_eof,
-                            saved_last_record_is_valid,
-                        );
-                        return Err(e.into());
-                    }
-                }
-                let bh = BlockHeader::from_bytes(bh_bytes);
-                if !bh.is_valid() {
-                    self.restore_state(
-                        saved_pos,
-                        saved_last_pos,
-                        saved_next_chunk_file_pos,
-                        saved_current_chunk_begin,
-                        saved_current_record_index,
-                        saved_at_eof,
-                        saved_last_record_is_valid,
-                    );
-                    return Err(RiegeliError::MalformedData(format!(
-                        "invalid block header at {scan_pos} during size scan"
-                    ).into()));
-                }
-                scan_pos += BLOCK_HEADER_SIZE;
-            }
-
-            // Try to read the chunk header.
-            self.reader.seek(SeekFrom::Start(scan_pos))?;
-            let mut ch_bytes = [0u8; 40];
-            match self.reader.read_exact(&mut ch_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            // Read chunk header (skipping leading and interleaved block headers).
+            let (ch, chunk_begin, _) = match self.read_chunk_header_at(scan_pos) {
+                Ok(Some(v)) => v,
+                Ok(None) => break, // EOF
                 Err(e) => {
                     self.restore_state(
                         saved_pos,
@@ -740,11 +679,10 @@ impl<R: Read + Seek> RecordReader<R> {
                         saved_at_eof,
                         saved_last_record_is_valid,
                     );
-                    return Err(e.into());
+                    return Err(e);
                 }
-            }
+            };
 
-            let ch = ChunkHeader::from_bytes(ch_bytes);
             if !ch.is_header_valid() {
                 self.restore_state(
                     saved_pos,
@@ -756,7 +694,7 @@ impl<R: Read + Seek> RecordReader<R> {
                     saved_last_record_is_valid,
                 );
                 return Err(RiegeliError::MalformedData(format!(
-                    "invalid chunk header at {scan_pos} during size scan"
+                    "invalid chunk header at {chunk_begin} during size scan"
                 ).into()));
             }
 
@@ -771,7 +709,7 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             // Advance past this chunk.
-            scan_pos = advance_past_chunk(scan_pos, data_size, num_records);
+            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
         }
 
         // Restore state.
@@ -834,38 +772,11 @@ impl<R: Read + Seek> RecordReader<R> {
         // Scan all chunks starting from the signature chunk (offset 24).
         let mut scan_pos: u64 = BLOCK_HEADER_SIZE; // = 24
 
-        loop {
-            // Handle block boundary.
-            if is_block_boundary(scan_pos) {
-                self.reader.seek(SeekFrom::Start(scan_pos))?;
-                let mut bh2 = [0u8; 24];
-                match self.reader.read_exact(&mut bh2) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => return Err(e.into()),
-                }
-                let bh = BlockHeader::from_bytes(bh2);
-                if !bh.is_valid() {
-                    return Err(RiegeliError::MalformedData(format!(
-                        "invalid block header hash at offset {scan_pos}"
-                    ).into()));
-                }
-                scan_pos += BLOCK_HEADER_SIZE;
-            }
-
-            // Read the chunk header.
-            self.reader.seek(SeekFrom::Start(scan_pos))?;
-            let mut ch_bytes = [0u8; 40];
-            match self.reader.read_exact(&mut ch_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            let ch = ChunkHeader::from_bytes(ch_bytes);
+        // Read chunk headers until EOF (skipping leading and interleaved block headers).
+        while let Some((ch, chunk_begin, data_begin)) = self.read_chunk_header_at(scan_pos)? {
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
-                    "invalid chunk header hash at offset {scan_pos}"
+                    "invalid chunk header hash at offset {chunk_begin}"
                 ).into()));
             }
 
@@ -873,15 +784,15 @@ impl<R: Read + Seek> RecordReader<R> {
             let num_records = ch.num_records();
 
             // Read the raw chunk data (without decompressing) and validate data hash.
-            let chunk_data = self.read_chunk_data(scan_pos, data_size)?;
+            let chunk_data = self.read_chunk_data(data_begin, data_size)?;
             if !ch.is_data_valid(&chunk_data) {
                 return Err(RiegeliError::MalformedData(format!(
-                    "chunk data hash mismatch at offset {scan_pos}"
+                    "chunk data hash mismatch at offset {chunk_begin}"
                 ).into()));
             }
 
             // Advance past this chunk.
-            scan_pos = advance_past_chunk(scan_pos, data_size, num_records);
+            scan_pos = advance_past_chunk(chunk_begin, data_size, num_records);
         }
 
         Ok(())
@@ -922,26 +833,13 @@ impl<R: Read + Seek> RecordReader<R> {
         loop {
             let pos = self.next_chunk_file_pos;
 
-            // Handle block boundary: read and validate block header.
-            let data_start = self.read_block_headers(pos)?;
-            if data_start != pos {
-                // We consumed block header bytes; pos is now data_start.
-                // But we need to check EOF.
-            }
+            // Read the chunk header, skipping any leading block header and any
+            // block header interleaved within the 40-byte header span.
+            let (ch, data_start, data_begin) = match self.read_chunk_header_at(pos)? {
+                Some(v) => v,
+                None => return Ok(false), // EOF
+            };
 
-            // Attempt to read the chunk header.
-            self.reader.seek(SeekFrom::Start(data_start))?;
-
-            let mut ch_bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
-            match self.reader.read_exact(&mut ch_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Ok(false); // EOF
-                }
-                Err(e) => return Err(e.into()),
-            }
-
-            let ch = ChunkHeader::from_bytes(ch_bytes);
             if !ch.is_header_valid() {
                 return Err(RiegeliError::MalformedData(format!(
                     "invalid chunk header hash at file position {data_start}"
@@ -955,7 +853,7 @@ impl<R: Read + Seek> RecordReader<R> {
             let data_file_end = advance_past_chunk(data_start, data_size, num_records);
 
             // Read the chunk data (skipping block headers).
-            let chunk_data = self.read_chunk_data(data_start, data_size)?;
+            let chunk_data = self.read_chunk_data(data_begin, data_size)?;
 
             // Validate data hash.
             if !ch.is_data_valid(&chunk_data) {
@@ -1022,47 +920,75 @@ impl<R: Read + Seek> RecordReader<R> {
         }
     }
 
-    /// Read block headers at `pos` if at a block boundary.
+    /// Read the 40-byte chunk header at `pos`, skipping and validating the
+    /// block headers that the writer interleaves at every block boundary —
+    /// both a block header directly at `pos` and one falling inside the
+    /// 40-byte span (a chunk header may straddle a block boundary).
     ///
-    /// Returns the file position of the first non-block-header byte.
-    /// Returns `Err` on invalid block header hash.
-    fn read_block_headers(&mut self, pos: u64) -> Result<u64, RiegeliError> {
-        if !is_block_boundary(pos) {
-            return Ok(pos);
-        }
+    /// Returns `Ok(None)` on a clean EOF. Otherwise returns
+    /// `(header, chunk_begin, data_begin)`: `chunk_begin` is the position of
+    /// the header's first byte (after any leading block header) — the value
+    /// to use for record positions and `advance_past_chunk` — and
+    /// `data_begin` is the position of the first chunk-data byte.
+    fn read_chunk_header_at(
+        &mut self,
+        pos: u64,
+    ) -> Result<Option<(ChunkHeader, u64, u64)>, RiegeliError> {
+        let mut file_pos = pos;
+        let mut bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
+        let mut filled: usize = 0;
+        let mut chunk_begin: Option<u64> = None;
 
-        // Read 24-byte block header.
-        self.reader.seek(SeekFrom::Start(pos))?;
-        let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
-        match self.reader.read_exact(&mut bh_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(pos); // EOF at boundary is OK
+        while filled < bytes.len() {
+            if is_block_boundary(file_pos) {
+                self.reader.seek(SeekFrom::Start(file_pos))?;
+                let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
+                match self.reader.read_exact(&mut bh_bytes) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+                let bh = BlockHeader::from_bytes(bh_bytes);
+                if !bh.is_valid() {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "invalid block header hash at file position {file_pos}"
+                    ).into()));
+                }
+                file_pos += BLOCK_HEADER_SIZE;
             }
-            Err(e) => return Err(e.into()),
+            if chunk_begin.is_none() {
+                chunk_begin = Some(file_pos);
+            }
+
+            let until_boundary = BLOCK_SIZE - (file_pos % BLOCK_SIZE);
+            let to_read = ((bytes.len() - filled) as u64).min(until_boundary) as usize;
+            self.reader.seek(SeekFrom::Start(file_pos))?;
+            match self.reader.read_exact(&mut bytes[filled..filled + to_read]) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+            filled += to_read;
+            file_pos += to_read as u64;
         }
 
-        let bh = BlockHeader::from_bytes(bh_bytes);
-        if !bh.is_valid() {
-            return Err(RiegeliError::MalformedData(format!(
-                "invalid block header hash at file position {pos}"
-            ).into()));
-        }
-
-        Ok(pos + BLOCK_HEADER_SIZE)
+        let chunk_begin = chunk_begin.expect("loop body ran at least once");
+        Ok(Some((ChunkHeader::from_bytes(bytes), chunk_begin, file_pos)))
     }
 
-    /// Read `data_size` bytes of chunk data, skipping block headers at boundaries.
+    /// Read `data_size` bytes of chunk data starting at `data_begin`,
+    /// skipping block headers at boundaries. `data_begin` must be the
+    /// position of the first data byte (as returned by
+    /// `read_chunk_header_at`), which is not `chunk_begin + 40` when the
+    /// chunk header straddles a block boundary.
     fn read_chunk_data(
         &mut self,
-        chunk_header_pos: u64,
+        data_begin: u64,
         data_size: u64,
     ) -> Result<Vec<u8>, RiegeliError> {
-        // Data starts right after the chunk header.
-        let data_start = chunk_header_pos + CHUNK_HEADER_SIZE;
         let mut result = Vec::with_capacity(data_size as usize);
         let mut remaining = data_size;
-        let mut file_pos = data_start;
+        let mut file_pos = data_begin;
 
         while remaining > 0 {
             // Skip block header if at boundary.
@@ -1100,23 +1026,12 @@ impl<R: Read + Seek> RecordReader<R> {
     ///
     /// Returns `Ok(None)` at EOF.
     fn load_chunk_at(&mut self, file_pos: u64) -> Result<Option<ActiveDecoder>, RiegeliError> {
-        // Handle block boundary.
-        let data_start = if is_block_boundary(file_pos) {
-            self.read_block_headers(file_pos)?
-        } else {
-            file_pos
+        // Read the chunk header (skipping leading and interleaved block headers).
+        let (ch, data_start, data_begin) = match self.read_chunk_header_at(file_pos)? {
+            Some(v) => v,
+            None => return Ok(None), // EOF
         };
 
-        self.reader.seek(SeekFrom::Start(data_start))?;
-
-        let mut ch_bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
-        match self.reader.read_exact(&mut ch_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-
-        let ch = ChunkHeader::from_bytes(ch_bytes);
         if !ch.is_header_valid() {
             return Err(RiegeliError::MalformedData(format!(
                 "invalid chunk header hash at file position {data_start}"
@@ -1124,7 +1039,7 @@ impl<R: Read + Seek> RecordReader<R> {
         }
 
         let data_size = ch.data_size();
-        let chunk_data = self.read_chunk_data(data_start, data_size)?;
+        let chunk_data = self.read_chunk_data(data_begin, data_size)?;
 
         if !ch.is_data_valid(&chunk_data) {
             return Err(RiegeliError::MalformedData(format!(
@@ -1162,28 +1077,9 @@ impl<R: Read + Seek> RecordReader<R> {
 
     /// Peek at the chunk header at file_pos without advancing state.
     fn peek_chunk_header(&mut self, file_pos: u64) -> Result<Option<ChunkHeader>, RiegeliError> {
-        // Handle block boundary.
-        let data_start = if is_block_boundary(file_pos) {
-            self.reader.seek(SeekFrom::Start(file_pos))?;
-            let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
-            match self.reader.read_exact(&mut bh_bytes) {
-                Ok(()) => file_pos + BLOCK_HEADER_SIZE,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(e.into()),
-            }
-        } else {
-            file_pos
-        };
-
-        self.reader.seek(SeekFrom::Start(data_start))?;
-        let mut ch_bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
-        match self.reader.read_exact(&mut ch_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-
-        Ok(Some(ChunkHeader::from_bytes(ch_bytes)))
+        Ok(self
+            .read_chunk_header_at(file_pos)?
+            .map(|(ch, _, _)| ch))
     }
 
     /// Skip block headers at `pos` and return the file position after them.
@@ -1235,7 +1131,6 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    #[cfg(feature = "brotli")]
     use crate::compression::CompressionType;
     use crate::record_writer::{RecordWriter, WriterOptions};
 
@@ -1678,6 +1573,108 @@ mod tests {
         // Before the fix this call never returned: load_next_chunk() hit the
         // unknown chunk and retried the same file position forever.
         assert_eq!(reader.read_record().expect("read ok"), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Chunk headers that straddle a 64 KiB block boundary
+    // -------------------------------------------------------------------------
+
+    /// Write `n` single-record chunks of `rec_size` incompressible-layout
+    /// bytes (flush per record, no compression) and return the file bytes.
+    /// With rec_size around 16 KiB the fourth chunk's header lands near the
+    /// first 64 KiB block boundary.
+    fn write_chunks_past_first_block(rec_size: usize, n: usize) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut w = RecordWriter::new(
+                &mut buf,
+                WriterOptions::new().compression(CompressionType::None),
+            )
+            .expect("writer new ok");
+            for i in 0..n {
+                let rec = vec![(i % 251) as u8; rec_size];
+                w.write_record(&rec).expect("write ok");
+                w.flush().expect("flush ok");
+            }
+        }
+        buf.into_inner()
+    }
+
+    /// Returns true if any chunk in the file has a header straddling a block
+    /// boundary (header begins within 40 bytes below a 64 KiB multiple).
+    fn has_straddling_chunk_header(data: &[u8]) -> bool {
+        let mut reader = RecordReader::new(Cursor::new(data.to_vec()), ReaderOptions::new())
+            .expect("reader new ok");
+        let mut straddles = false;
+        while let Some(_) = reader.read_record().expect("read ok") {
+            let begin = reader.last_pos().chunk_begin;
+            let offset = begin % BLOCK_SIZE;
+            if offset > BLOCK_SIZE - 40 {
+                straddles = true;
+            }
+        }
+        straddles
+    }
+
+    /// The writer interleaves a 24-byte block header inside the 40-byte chunk
+    /// header when a chunk begins within 40 bytes of a block boundary. Before
+    /// the fix, every read path fetched the header with one contiguous
+    /// read_exact and failed with "invalid chunk header hash" on such files.
+    #[test]
+    fn chunk_header_straddling_block_boundary_roundtrip() {
+        let n = 6;
+        let mut exercised_straddle = false;
+        // Sweep the record size so the fourth chunk's header walks across the
+        // 64 KiB boundary; the exact straddling sizes shift if writer overhead
+        // changes, which is why this is a sweep and not a single size.
+        for rec_size in 16300..16340usize {
+            let data = write_chunks_past_first_block(rec_size, n);
+            exercised_straddle |= has_straddling_chunk_header(&data);
+
+            let mut reader =
+                RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+            let mut count = 0;
+            while let Some(rec) = reader.read_record().expect("read ok") {
+                assert_eq!(rec.len(), rec_size, "rec_size={rec_size} record {count}");
+                count += 1;
+            }
+            assert_eq!(count, n, "rec_size={rec_size}: wrong record count");
+        }
+        assert!(
+            exercised_straddle,
+            "sweep never produced a straddling chunk header; widen the range"
+        );
+    }
+
+    /// size() and seek() walk chunk headers with their own scan loops; they
+    /// must handle straddling headers too.
+    #[test]
+    fn chunk_header_straddling_block_boundary_size_and_seek() {
+        let n = 6;
+        // Find a straddling layout within the sweep window.
+        let data = (16300..16340usize)
+            .map(|rec_size| write_chunks_past_first_block(rec_size, n))
+            .find(|data| has_straddling_chunk_header(data))
+            .expect("no straddling layout found in sweep; widen the range");
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(reader.size().expect("size ok"), n as u64);
+
+        // Collect record positions, then seek back to each and re-read.
+        let mut positions = Vec::new();
+        while let Some(_) = reader.read_record().expect("read ok") {
+            positions.push(reader.last_pos());
+        }
+        assert_eq!(positions.len(), n);
+        for (i, pos) in positions.into_iter().enumerate() {
+            reader.seek(pos).expect("seek ok");
+            let rec = reader
+                .read_record()
+                .expect("read after seek ok")
+                .unwrap_or_else(|| panic!("record {i} missing after seek"));
+            assert_eq!(rec[0], (i % 251) as u8, "record {i} content after seek");
+        }
     }
 
     #[test]

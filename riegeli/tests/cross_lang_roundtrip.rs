@@ -333,3 +333,80 @@ fn extra_cpp_write_brotli_zero_len_records_rust_read() {
         rust_read,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Chunk headers straddling a 64 KiB block boundary, cross-language.
+//
+// The writer interleaves a 24-byte block header inside the 40-byte chunk
+// header when a chunk begins within 40 bytes of a block boundary. Sweep
+// record sizes with one-record chunks so some chunk header in the file lands
+// in that window, and require that the sweep really exercised it.
+// ---------------------------------------------------------------------------
+
+/// True if any chunk in `data` has a header beginning within 40 bytes below
+/// a 64 KiB multiple (i.e. the header is interrupted by a block header).
+fn has_straddling_chunk_header(data: &[u8]) -> bool {
+    use riegeli::{ReaderOptions, RecordReader};
+    let mut reader = RecordReader::new(std::io::Cursor::new(data.to_vec()), ReaderOptions::new())
+        .expect("reader new ok");
+    let mut straddles = false;
+    while reader.read_record().expect("read ok").is_some() {
+        let begin = reader.last_pos().chunk_begin;
+        if begin % 65536 > 65536 - 40 {
+            straddles = true;
+        }
+    }
+    straddles
+}
+
+#[test]
+fn straddling_chunk_header_rust_write_cpp_read() {
+    let mut straddle_layouts = 0;
+    for rec_size in 16300..16340usize {
+        let records: Vec<Vec<u8>> = (0..6).map(|i| vec![(i % 251) as u8; rec_size]).collect();
+        let data = rust_write(
+            &records,
+            RustWriterOptions::new()
+                .compression(CompressionType::None)
+                .chunk_size(rec_size as u64),
+        );
+        if has_straddling_chunk_header(&data) {
+            straddle_layouts += 1;
+        }
+        let got = cpp_read(&data);
+        assert_eq!(got.len(), records.len(), "rec_size={rec_size}: count");
+        for (i, (g, w)) in got.iter().zip(&records).enumerate() {
+            assert_eq!(g, w, "rec_size={rec_size}: record {i}");
+        }
+    }
+    assert!(
+        straddle_layouts > 0,
+        "sweep never produced a straddling chunk header; widen the range"
+    );
+}
+
+#[test]
+fn straddling_chunk_header_cpp_write_rust_read() {
+    let mut straddle_layouts = 0;
+    for rec_size in 16300..16340usize {
+        let records: Vec<Vec<u8>> = (0..6).map(|i| vec![(i % 251) as u8; rec_size]).collect();
+        let data = cpp_write(
+            &records,
+            FfiWriterOptions::new()
+                .compression(Compression::None)
+                .chunk_size(rec_size as u64),
+        );
+        if has_straddling_chunk_header(&data) {
+            straddle_layouts += 1;
+        }
+        let got = rust_read(&data);
+        assert_eq!(got.len(), records.len(), "rec_size={rec_size}: count");
+        for (i, (g, w)) in got.iter().zip(&records).enumerate() {
+            assert_eq!(g, w, "rec_size={rec_size}: record {i}");
+        }
+    }
+    assert!(
+        straddle_layouts > 0,
+        "sweep never produced a straddling chunk header; widen the range"
+    );
+}
