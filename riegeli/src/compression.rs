@@ -82,7 +82,11 @@ pub(crate) fn decompress_brotli(
     expected_len: usize,
 ) -> Result<Vec<u8>, RiegeliError> {
     use std::io::Read as _;
-    let mut output = Vec::with_capacity(expected_len);
+    // expected_len is claimed by the (possibly hostile) input; read_to_end
+    // grows the buffer as real bytes arrive, so the reservation is purely
+    // an optimization — cap it rather than trusting the claim.
+    const MAX_DECOMPRESS_PREALLOC: usize = 1 << 24; // 16 MiB
+    let mut output = Vec::with_capacity(expected_len.min(MAX_DECOMPRESS_PREALLOC));
     let mut reader = brotli::Decompressor::new(input, 4096);
     reader
         .read_to_end(&mut output)

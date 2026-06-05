@@ -46,7 +46,7 @@ pub fn is_possible_chunk_boundary(pos: u64) -> bool {
 /// A block boundary is returned unchanged (it is a valid chunk position);
 /// offsets 1..=24 advance to boundary + 25.
 pub fn round_up_to_possible_chunk_boundary(pos: u64) -> u64 {
-    pos + remaining_in_block(pos).saturating_sub(USABLE_BLOCK_SIZE - 1)
+    pos.saturating_add(remaining_in_block(pos).saturating_sub(USABLE_BLOCK_SIZE - 1))
 }
 
 /// Canonicalize a chunk address: a chunk whose header physically follows a
@@ -73,10 +73,17 @@ pub fn canonical_chunk_address(pos: u64) -> u64 {
 /// `chunk_begin` may be given in either canonical or alias form; both
 /// addresses describe the same chunk and yield the same end position.
 pub fn chunk_end(chunk_begin: u64, data_size: u64, num_records: u64) -> u64 {
+    // Saturating arithmetic: callers are responsible for bounding
+    // data_size/num_records against the physical stream (the reader does so
+    // in read_chunk_header_at; the writer controls its own sizes), but a
+    // hostile value must never wrap — a wrapped end position moves scan
+    // loops backward, which turns a malformed file into an infinite loop.
+    // Saturation instead yields an end past any real stream, which readers
+    // fail cleanly on at the next read.
     let begin = canonical_chunk_address(chunk_begin);
     let end_from_data =
-        add_with_overhead(begin, crate::constants::CHUNK_HEADER_SIZE + data_size);
-    let end_from_records = round_up_to_possible_chunk_boundary(begin + num_records);
+        add_with_overhead(begin, crate::constants::CHUNK_HEADER_SIZE.saturating_add(data_size));
+    let end_from_records = round_up_to_possible_chunk_boundary(begin.saturating_add(num_records));
     end_from_data.max(end_from_records)
 }
 

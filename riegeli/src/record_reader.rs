@@ -109,6 +109,11 @@ pub struct RecordReader<R: Read + Seek> {
     at_eof: bool,
     /// True if the last record was read from a valid (non-recovered) chunk.
     last_record_is_valid: bool,
+    /// Stream length as last measured (re-measured on demand if a chunk's
+    /// claims exceed it, so a file growing between reads keeps working).
+    /// Bounds header-claimed sizes before they drive arithmetic or
+    /// allocation — the header hash proves integrity, not honesty.
+    stream_len: u64,
 }
 
 impl<R: Read + Seek> RecordReader<R> {
@@ -117,6 +122,7 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Validates the initial block header and signature chunk, then positions
     /// the reader at the first data chunk.
     pub fn new(mut reader: R, options: ReaderOptions) -> Result<Self, RiegeliError> {
+        let stream_len = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
 
         // Read and validate the first block header at offset 0.
@@ -170,6 +176,7 @@ impl<R: Read + Seek> RecordReader<R> {
             last_pos: initial_pos,
             at_eof: false,
             last_record_is_valid: true,
+            stream_len,
         })
     }
 
@@ -978,7 +985,45 @@ impl<R: Read + Seek> RecordReader<R> {
             file_pos += to_read as u64;
         }
 
-        Ok(Some((ChunkHeader::from_bytes(bytes), chunk_begin, file_pos)))
+        let ch = ChunkHeader::from_bytes(bytes);
+
+        // Validate header-claimed sizes against the physical stream before
+        // any caller does arithmetic, allocation, or overhead walking with
+        // them. The header hash only proves integrity, not honesty — anyone
+        // authoring a file can hash arbitrary claims, and unchecked claims
+        // reach u64 arithmetic (overflow), Vec::with_capacity (allocation
+        // bombs), and an O(claim) block-overhead walk. No well-formed file
+        // is rejected: chunk data cannot extend past end of file, and the
+        // format guarantees a chunk spans at least num_records file bytes.
+        // Claims of a hash-invalid header are not checked here — callers
+        // report those with their own header-hash errors.
+        if ch.is_header_valid() {
+            let data_begin = file_pos;
+            if ch.data_size() > self.stream_len.saturating_sub(data_begin)
+                || ch.num_records() > self.stream_len.saturating_sub(chunk_begin)
+            {
+                // Re-measure before rejecting: a seek resets EOF, so a file
+                // that grew since the last measurement is a supported way
+                // to keep reading — the bound must track the growth.
+                self.stream_len = self.reader.seek(SeekFrom::End(0))?;
+                if ch.data_size() > self.stream_len.saturating_sub(data_begin) {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "chunk at {chunk_begin} claims {} data bytes with only {} bytes left in the stream",
+                        ch.data_size(),
+                        self.stream_len.saturating_sub(data_begin)
+                    ).into()));
+                }
+                if ch.num_records() > self.stream_len.saturating_sub(chunk_begin) {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "chunk at {chunk_begin} claims {} records with only {} bytes left in the stream",
+                        ch.num_records(),
+                        self.stream_len.saturating_sub(chunk_begin)
+                    ).into()));
+                }
+            }
+        }
+
+        Ok(Some((ch, chunk_begin, file_pos)))
     }
 
     /// Read `data_size` bytes of chunk data starting at `data_begin`,
@@ -991,9 +1036,16 @@ impl<R: Read + Seek> RecordReader<R> {
         data_begin: u64,
         data_size: u64,
     ) -> Result<Vec<u8>, RiegeliError> {
-        let mut result = Vec::with_capacity(data_size as usize);
+        // data_size is validated against the stream by read_chunk_header_at;
+        // the min is defense in depth for any future unvalidated caller.
+        let mut result = Vec::with_capacity(data_size.min(self.stream_len) as usize);
         let mut remaining = data_size;
         let mut file_pos = data_begin;
+
+        // Always position explicitly: callers cannot guarantee the reader's
+        // physical position (the header read may have re-measured the stream
+        // length against a growing file, which seeks to the end).
+        self.reader.seek(SeekFrom::Start(file_pos))?;
 
         while remaining > 0 {
             // Skip block header if at boundary.
@@ -1082,9 +1134,23 @@ impl<R: Read + Seek> RecordReader<R> {
 
     /// Peek at the chunk header at file_pos without advancing state.
     fn peek_chunk_header(&mut self, file_pos: u64) -> Result<Option<ChunkHeader>, RiegeliError> {
-        Ok(self
-            .read_chunk_header_at(file_pos)?
-            .map(|(ch, _, _)| ch))
+        match self.read_chunk_header_at(file_pos)? {
+            None => Ok(None),
+            // Hash-invalid headers carry unvalidated claims (the stream-bound
+            // check in read_chunk_header_at only covers hash-valid headers,
+            // since the other callers report hash failures themselves). A
+            // peek must not hand such claims to seek scans or metadata reads
+            // — a corrupted header claiming a huge size would drive an
+            // O(claim) overhead walk or an oversized read.
+            Some((ch, chunk_begin, _)) => {
+                if !ch.is_header_valid() {
+                    return Err(RiegeliError::MalformedData(format!(
+                        "invalid chunk header hash at file position {chunk_begin}"
+                    ).into()));
+                }
+                Ok(Some(ch))
+            }
+        }
     }
 }
 
@@ -1516,6 +1582,28 @@ mod tests {
         unknown_type_chunk_with_records(0)
     }
 
+    /// A 40-byte Simple-chunk header with valid hashes but hostile claimed
+    /// sizes, and no data bytes. The hash proves integrity, not honesty —
+    /// these claims must be rejected against the physical stream.
+    fn hostile_simple_chunk(data_size: u64, num_records: u64) -> Vec<u8> {
+        let data_hash = crate::hash::highway_hash_64(&[]);
+        let chunk_type_and_num_records: u64 =
+            (num_records << 8) | (ChunkType::Simple as u8 as u64);
+        let decoded_data_size: u64 = 0;
+
+        let mut body = [0u8; 32];
+        body[0..8].copy_from_slice(&data_size.to_le_bytes());
+        body[8..16].copy_from_slice(&data_hash.to_le_bytes());
+        body[16..24].copy_from_slice(&chunk_type_and_num_records.to_le_bytes());
+        body[24..32].copy_from_slice(&decoded_data_size.to_le_bytes());
+        let header_hash = crate::hash::highway_hash_64(&body);
+
+        let mut out = Vec::with_capacity(40);
+        out.extend_from_slice(&header_hash.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
     fn unknown_type_chunk_with_records(num_records: u64) -> Vec<u8> {
         let data_size: u64 = 0;
         let data_hash = crate::hash::highway_hash_64(&[]);
@@ -1744,6 +1832,128 @@ mod tests {
                     rec.as_deref().map(|r| String::from_utf8_lossy(r).into_owned())
                 ),
             }
+        }
+    }
+
+    /// A reader over a file that grows between reads is supported: hitting
+    /// a chunk whose claims exceed the current length re-measures the
+    /// stream, and a read after the file has grown must succeed. The
+    /// re-measure seeks to the end, so the subsequent data read must
+    /// position itself explicitly rather than assume the header read left
+    /// the reader at the data start.
+    #[test]
+    fn growing_file_read_resumes_after_remeasure() {
+        struct SharedReader(Rc<RefCell<Cursor<Vec<u8>>>>);
+        impl std::io::Read for SharedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().read(buf)
+            }
+        }
+        impl std::io::Seek for SharedReader {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.0.borrow_mut().seek(pos)
+            }
+        }
+        use std::io::Read as _;
+
+        let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
+        let full = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));
+        assert_eq!(&full[..one.len()], &one[..]);
+
+        // Truncate right after the second chunk's 40-byte header: the header
+        // parses, but its claimed data extends past the current end.
+        let cut = one.len() + 40;
+        assert!(cut < full.len());
+        let shared = Rc::new(RefCell::new(Cursor::new(full[..cut].to_vec())));
+
+        let mut reader = RecordReader::new(SharedReader(Rc::clone(&shared)), ReaderOptions::new())
+            .expect("reader new ok");
+        assert_eq!(reader.read_record().expect("read ok").as_deref(), Some(&b"first"[..]));
+
+        // Before the file grows, the claim exceeds the stream even after
+        // re-measurement: clean error.
+        assert!(reader.read_record().is_err(), "truncated read must error");
+
+        // Grow the underlying file to its full contents (position preserved)
+        // and retry: the re-measure must accept it AND the data read must
+        // land on the chunk, not wherever the re-measure seek ended up.
+        {
+            let mut c = shared.borrow_mut();
+            let pos = c.position();
+            *c = Cursor::new(full.clone());
+            c.set_position(pos);
+        }
+        assert_eq!(
+            reader.read_record().expect("read after growth ok").as_deref(),
+            Some(&b"second"[..]),
+            "growing-file read must resume correctly after re-measure"
+        );
+        assert_eq!(reader.read_record().expect("read ok"), None);
+    }
+
+    /// A hash-INVALID header's claims are just as hostile as a hash-valid
+    /// one's: seek scans peek headers without reporting hash errors inline,
+    /// and must not feed unvalidated claims into chunk-end arithmetic (a
+    /// u64::MAX claim drives an O(claim) overhead walk — an effective hang).
+    #[test]
+    fn seek_numeric_rejects_hash_invalid_header_claims() {
+        let base = write_records(&[b"only"], WriterOptions::new());
+        let mut hostile = hostile_simple_chunk(u64::MAX, 1);
+        hostile[0] ^= 0xFF; // corrupt the header hash
+        let mut data = base.clone();
+        data.extend_from_slice(&hostile);
+
+        let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())
+            .expect("reader new ok");
+        // Without the peek validity check this call never returns (the
+        // overhead walk runs ~2^48 iterations); with it, a clean error.
+        let err = reader
+            .seek_numeric(u64::MAX / 2)
+            .expect_err("corrupt header in scan path must error");
+        assert!(
+            err.to_string().contains("invalid chunk header hash"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Header-claimed sizes beyond the physical stream must produce a clean,
+    /// persistent error — no arithmetic overflow (debug panic / release
+    /// wrap), no claim-sized allocation, no O(claim) overhead walk. Sweeps
+    /// the overflow, mid-range, and barely-past-EOF regimes for both the
+    /// data-size and record-count claims.
+    #[test]
+    fn hostile_header_claims_are_rejected() {
+        let base = write_records(&[b"only"], WriterOptions::new());
+        for (data_size, num_records) in [
+            (u64::MAX, 1u64),      // overflow regime (wraps without saturation)
+            (u64::MAX - 40, 1),    // offset overflow variant
+            (1u64 << 40, 1),       // 1 TiB claim: allocation / walk regime
+            (4096, 1),             // modest claim, still past EOF
+            (0, u64::MAX >> 8),    // maximal record-count claim
+            (0, 1u64 << 40),       // mid-range record-count claim
+        ] {
+            let mut data = base.clone();
+            data.extend_from_slice(&hostile_simple_chunk(data_size, num_records));
+
+            let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())
+                .expect("reader new ok");
+            assert_eq!(
+                reader.read_record().expect("read ok").as_deref(),
+                Some(&b"only"[..]),
+                "data_size={data_size} num_records={num_records}"
+            );
+            let err = reader
+                .read_record()
+                .expect_err("hostile claim must be rejected");
+            assert!(
+                err.to_string().contains("claims"),
+                "data_size={data_size} num_records={num_records}: unexpected error: {err}"
+            );
+            // The rejection must be persistent, like every other read error.
+            assert!(
+                reader.read_record().is_err(),
+                "data_size={data_size} num_records={num_records}: error not persistent"
+            );
         }
     }
 }
