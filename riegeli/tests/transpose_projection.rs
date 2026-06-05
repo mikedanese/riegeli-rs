@@ -566,3 +566,61 @@ fn existence_only_submessage_emits_tag_in_transpose() {
         "transpose existence-only submessage must match the simple-chunk output"
     );
 }
+
+/// An existence-only submessage CONTAINING a nested submessage with content,
+/// followed by an included sibling — the interleaved-skip-levels case. The
+/// output must be exactly tag + 0x00 for the EO field, then the sibling:
+/// nothing from the nested interior may leak, and record limits must hold.
+#[test]
+fn existence_only_submessage_with_nested_content_and_sibling() {
+    let innermost = encode_varint_field(5, 42);
+    let inner = encode_string_field(3, &innermost); // nested submessage
+    let outer_sub = encode_string_field(1, &inner); // field 1: submessage (EO target)
+    let mut record = outer_sub.clone();
+    record.extend_from_slice(&encode_varint_field(2, 7)); // included sibling
+
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new()
+        .add_field(Field::new(vec![1]).existence_only())
+        .add_field(Field::new(vec![2]));
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), 1);
+
+    let mut expected = encode_u32((1 << 3) | 2);
+    expected.push(0x00);
+    expected.extend_from_slice(&encode_varint_field(2, 7));
+    assert_eq!(got[0], expected, "EO interior must not leak; sibling must survive");
+}
+
+/// Two sequential existence-only submessages: frame/level pairing must not
+/// cross-match between them.
+#[test]
+fn sequential_existence_only_submessages() {
+    let sub1 = encode_string_field(1, &encode_varint_field(9, 1));
+    let sub2 = encode_string_field(2, &encode_varint_field(9, 2));
+    let mut record = sub1.clone();
+    record.extend_from_slice(&sub2);
+
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new()
+            .transpose(true)
+            .compression(CompressionType::None),
+    );
+    let proj = FieldProjection::new()
+        .add_field(Field::new(vec![1]).existence_only())
+        .add_field(Field::new(vec![2]).existence_only());
+    let got = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(got.len(), 1);
+
+    let mut expected = encode_u32((1 << 3) | 2);
+    expected.push(0x00);
+    expected.extend_from_slice(&encode_u32((2 << 3) | 2));
+    expected.push(0x00);
+    assert_eq!(got[0], expected, "sequential EO submessages must pair independently");
+}
