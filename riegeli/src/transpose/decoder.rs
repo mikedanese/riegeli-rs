@@ -1033,7 +1033,10 @@ impl TransposeChunkDecoder {
         let num_buffers = parsed.num_buffers;
         let hdr = &mut parsed.hdr;
 
-        let mut nodes: Vec<StateMachineNode> = Vec::with_capacity(num_states + 0xFF);
+        // num_states is a header claim — cap the reservation by the bytes
+        // actually available, like every sibling reservation built from it.
+        let mut nodes: Vec<StateMachineNode> =
+            Vec::with_capacity(num_states.min(hdr.remaining()) + 0xFF);
         let mut node_templates: Vec<NodeTemplate> = Vec::new();
         let mut subtype_idx: usize = 0;
         let mut has_nonproto_op = false;
