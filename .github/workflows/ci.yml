@@ -109,7 +109,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version 0.13.1
+        run: cargo install cargo-fuzz --locked --version 0.13.2
 
       - name: Build fuzz targets
         run: cargo fuzz build
