@@ -12,7 +12,7 @@ data processing. This crate is byte-level compatible with the C++ reference impl
 
 ```toml
 [dependencies]
-riegeli = "0.1"
+riegeli = "0.2"
 ```
 
 ```rust
