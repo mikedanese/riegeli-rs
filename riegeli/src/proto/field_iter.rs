@@ -223,6 +223,13 @@ pub fn serialize_field(buf: &mut Vec<u8>, field: &ProtoField<'_>) {
 /// fields (this is necessary to find the next field boundary), but their
 /// values are not delivered to the caller.
 ///
+/// A group is treated as a single top-level field spanning its `StartGroup`
+/// and `EndGroup` markers: if the group's field number is allowed, the whole
+/// group is yielded including its contents (regardless of the field numbers
+/// inside); otherwise the whole group is skipped, and fields nested inside it
+/// are never surfaced as top-level fields. This matches how length-delimited
+/// submessages are kept or dropped atomically by their outer field number.
+///
 /// # Example
 ///
 /// ```
@@ -244,6 +251,12 @@ pub fn serialize_field(buf: &mut Vec<u8>, field: &ProtoField<'_>) {
 pub struct FilteredFieldIter<'a> {
     inner: ProtoFieldIter<'a>,
     allowed: &'a [u32],
+    /// Current group nesting depth. Zero when at the top level of the message.
+    group_depth: usize,
+    /// Whether the group subtree currently being traversed (when
+    /// `group_depth > 0`) is being kept or skipped. Decided once at the
+    /// group's top-level `StartGroup` marker.
+    keeping_group: bool,
 }
 
 impl<'a> FilteredFieldIter<'a> {
@@ -257,6 +270,8 @@ impl<'a> FilteredFieldIter<'a> {
         FilteredFieldIter {
             inner: ProtoFieldIter::new(data),
             allowed,
+            group_depth: 0,
+            keeping_group: false,
         }
     }
 }
@@ -268,6 +283,31 @@ impl<'a> Iterator for FilteredFieldIter<'a> {
         loop {
             match self.inner.next() {
                 Some(Ok(field)) => {
+                    if self.group_depth > 0 {
+                        // Inside a group: the keep/skip decision was made at
+                        // the group's top-level StartGroup marker and applies
+                        // to the entire subtree. Only the nesting depth is
+                        // tracked here.
+                        match field.wire_type {
+                            WireType::StartGroup => self.group_depth += 1,
+                            WireType::EndGroup => self.group_depth -= 1,
+                            _ => {}
+                        }
+                        if self.keeping_group {
+                            return Some(Ok(field));
+                        }
+                        continue;
+                    }
+                    if field.wire_type == WireType::StartGroup {
+                        // A top-level group is one field: keep or skip it as a
+                        // whole based on the group's own field number.
+                        self.group_depth = 1;
+                        self.keeping_group = self.allowed.contains(&field.field_number);
+                        if self.keeping_group {
+                            return Some(Ok(field));
+                        }
+                        continue;
+                    }
                     if self.allowed.contains(&field.field_number) {
                         return Some(Ok(field));
                     }
@@ -599,5 +639,84 @@ mod tests {
         let second = iter.next().expect("second field present");
         assert!(second.is_err(), "oversized length must yield Err");
         assert!(iter.next().is_none());
+    }
+
+    // StartGroup(2) { field 1: varint 42 } EndGroup(2), then top-level
+    // field 1: varint 7.
+    fn group_message() -> Vec<u8> {
+        vec![
+            0x13, // tag: field 2, StartGroup
+            0x08, 42,   // field 1, varint 42 (inside group 2)
+            0x14, // tag: field 2, EndGroup
+            0x08, 0x07, // field 1, varint 7 (top level)
+        ]
+    }
+
+    #[test]
+    fn filtered_iter_excluded_group_skips_contents() {
+        // Filtering to field 1 must not hoist the field 1 occurrence nested
+        // inside the excluded group 2 to top level. The whole group is one
+        // top-level field and is skipped as a unit.
+        let data = group_message();
+        let fields: Vec<_> = FilteredFieldIter::new(&data, &[1])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1, "only the top-level field 1 is kept");
+        assert_eq!(fields[0].field_number, 1);
+        assert_eq!(fields[0].value, FieldValue::Varint(7));
+    }
+
+    #[test]
+    fn filtered_iter_allowed_group_keeps_contents() {
+        // Filtering to field 2 keeps the whole group, including nested fields
+        // whose numbers are not in the allowed set.
+        let data = group_message();
+        let fields: Vec<_> = FilteredFieldIter::new(&data, &[2])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].value, FieldValue::StartGroup);
+        assert_eq!(fields[0].field_number, 2);
+        assert_eq!(fields[1].field_number, 1);
+        assert_eq!(fields[1].value, FieldValue::Varint(42));
+        assert_eq!(fields[2].value, FieldValue::EndGroup);
+        assert_eq!(fields[2].field_number, 2);
+    }
+
+    #[test]
+    fn filtered_iter_excluded_nested_group_skips_all_contents() {
+        // Group 2 containing nested group 3 containing field 1; everything is
+        // skipped when 2 is excluded, including the inner group's fields.
+        let data: Vec<u8> = vec![
+            0x13, // field 2, StartGroup
+            0x1B, // field 3, StartGroup
+            0x08, 42,   // field 1, varint 42
+            0x1C, // field 3, EndGroup
+            0x14, // field 2, EndGroup
+            0x08, 0x07, // field 1, varint 7 (top level)
+        ];
+        let fields: Vec<_> = FilteredFieldIter::new(&data, &[1, 3])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].value, FieldValue::Varint(7));
+    }
+
+    #[test]
+    fn copy_fields_does_not_hoist_group_contents() {
+        let data = group_message();
+        let mut writer = super::super::writer::SerializedMessageWriter::new();
+        copy_fields(&data, &[1], &mut writer).unwrap();
+        let out = writer.finish().unwrap();
+        assert_eq!(out, vec![0x08, 0x07], "group contents must not leak");
+    }
+
+    #[test]
+    fn copy_fields_keeps_allowed_group_intact() {
+        let data = group_message();
+        let mut writer = super::super::writer::SerializedMessageWriter::new();
+        copy_fields(&data, &[2], &mut writer).unwrap();
+        let out = writer.finish().unwrap();
+        assert_eq!(out, vec![0x13, 0x08, 42, 0x14]);
     }
 }
