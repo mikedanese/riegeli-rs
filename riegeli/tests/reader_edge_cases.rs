@@ -32,7 +32,7 @@ fn open_reader(data: Vec<u8>) -> RecordReader<Cursor<Vec<u8>>> {
 
 // ── A: read_metadata() on a file with no metadata returns None ──────────────
 #[test]
-fn adv_a_read_metadata_returns_none_when_absent() {
+fn read_metadata_returns_none_when_absent() {
     let data = write_records(&[b"hello", b"world"], WriterOptions::new());
     let mut reader = open_reader(data);
     let meta = reader
@@ -46,7 +46,7 @@ fn adv_a_read_metadata_returns_none_when_absent() {
 
 // ── B: size() on file with metadata chunk counts only data records ────────────
 #[test]
-fn adv_b_size_excludes_metadata_chunk() {
+fn size_excludes_metadata_chunk() {
     // Write 5 records with metadata; size() should still return 5.
     let records: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e"];
     let data = write_records(
@@ -63,7 +63,7 @@ fn adv_b_size_excludes_metadata_chunk() {
 
 // ── C: check_file_format() called mid-read doesn't break subsequent reads ────
 #[test]
-fn adv_c_check_file_format_mid_read_preserves_state() {
+fn check_file_format_mid_read_preserves_state() {
     let records: Vec<Vec<u8>> = (0u32..5).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new());
@@ -97,7 +97,7 @@ fn adv_c_check_file_format_mid_read_preserves_state() {
 
 // ── D: seek_back() twice in a row stays on the last-read record ──────────────
 #[test]
-fn adv_d_seek_back_twice_stays_on_same_record() {
+fn seek_back_twice_stays_on_same_record() {
     let records: Vec<Vec<u8>> = (0u32..5).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new());
@@ -126,7 +126,7 @@ fn adv_d_seek_back_twice_stays_on_same_record() {
 
 // ── E: seek_back() after reading the first record returns Ok(true) ────────────
 #[test]
-fn adv_e_seek_back_after_first_record() {
+fn seek_back_after_first_record() {
     // seek_back() positions at the last record read; after reading record 0,
     // seek_back() returns Ok(true) and re-reads record 0.
     let records: Vec<Vec<u8>> = (0u32..3).map(|i| i.to_le_bytes().to_vec()).collect();
@@ -160,7 +160,7 @@ fn adv_e_seek_back_after_first_record() {
 
 // ── F: size() preserves last_record_is_valid flag ────────────────────────────
 #[test]
-fn adv_f_size_preserves_last_record_is_valid() {
+fn size_preserves_last_record_is_valid() {
     // Use a file with a corrupted chunk to trigger recovery.
     let records: Vec<Vec<u8>> = (0u32..5).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
@@ -202,7 +202,7 @@ fn adv_f_size_preserves_last_record_is_valid() {
 
 // ── G: check_file_format() on a file with corrupted block header fails at open ──
 #[test]
-fn adv_g_check_file_format_detects_bad_block_header() {
+fn check_file_format_detects_bad_block_header() {
     // Corrupt the initial block header hash (bytes [0..8]).
     let data = write_records(&[b"test"], WriterOptions::new());
     let mut corrupted = data.clone();
@@ -219,7 +219,7 @@ fn adv_g_check_file_format_detects_bad_block_header() {
 // ── H: read_metadata() works with Brotli-compressed data file ────────────────
 #[test]
 #[cfg(feature = "brotli")]
-fn adv_h_read_metadata_with_brotli_records() {
+fn read_metadata_with_brotli_records() {
     let meta = b"brotli-schema-v1".to_vec();
     let data = write_records(
         &[b"compressed record"],
@@ -255,7 +255,7 @@ fn adv_h_read_metadata_with_brotli_records() {
 // Expected: size() should not change the read position.
 // Actual: size() corrupts the reader by setting at_eof = true.
 #[test]
-fn adv_i_size_before_any_read_bug() {
+fn size_before_any_read_bug() {
     let records: Vec<Vec<u8>> = (0u32..42).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new());
@@ -277,7 +277,7 @@ fn adv_i_size_before_any_read_bug() {
 
 // ── J: read_metadata() does not advance the read position ────────────────────
 #[test]
-fn adv_j_read_metadata_does_not_advance_position() {
+fn read_metadata_does_not_advance_position() {
     let meta = b"schema".to_vec();
     let records = vec![b"rec0".as_ref(), b"rec1".as_ref(), b"rec2".as_ref()];
     let data = write_records(

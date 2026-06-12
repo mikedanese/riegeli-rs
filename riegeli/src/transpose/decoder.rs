@@ -2902,7 +2902,7 @@ mod tests {
     // These would require actual C++-generated files. Marked as skip in progress.json.
 
     // -------------------------------------------------------------------
-    // Sprint 9 adversarial: roundtrip tests using TransposeChunkEncoder
+    // Roundtrip tests using TransposeChunkEncoder
     // -------------------------------------------------------------------
 
     /// Helper: encode records then decode, returning decoded records.
@@ -3202,7 +3202,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Sprint 31: Projection-aware callback type tests
+    // Projection-aware callback type tests
     // =========================================================================
 
     #[test]

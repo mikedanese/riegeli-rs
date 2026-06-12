@@ -1,4 +1,4 @@
-//! Sprint 28: Field Filtering, Copying, and Composition tests.
+//! Field filtering, copying, and composition tests.
 
 // Some imports are used only by feature-gated tests; in reduced-feature
 // builds they would otherwise trip unused_imports.
@@ -576,7 +576,7 @@ fn compose_handlers_fixed64_dispatch() {
 // No per-field heap allocation
 // ===========================================================================
 
-// This criterion is structural: the static handler set uses generics and trait
+// This property is structural: the static handler set uses generics and trait
 // dispatch, not Box<dyn ...>. We verify this by:
 // 1. Using StaticHandlerSet (compile-time monomorphized, no boxing).
 // 2. Context is captured via &mut references in the handler structs.

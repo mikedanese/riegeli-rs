@@ -677,7 +677,7 @@ mod tests {
     use crate::hash::highway_hash_64;
 
     // -------------------------------------------------------------------------
-    // Sprint 3 regression tests (uncompressed)
+    // Uncompressed round-trip regression tests
     // -------------------------------------------------------------------------
 
     #[test]
@@ -778,10 +778,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 4: compressed tests
+    // Compressed chunk tests
     // -------------------------------------------------------------------------
 
-    // Criterion 4.1: Brotli chunk has first data byte == b'b'
+    // Brotli chunk has first data byte == b'b'
     #[test]
     #[cfg(feature = "brotli")]
     fn brotli_first_byte_is_b() {
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(chunk.data[0], b'b', "first data byte must be b'b' (0x62)");
     }
 
-    // Criterion 4.2: round-trip with Brotli
+    // round-trip with Brotli
     #[test]
     #[cfg(feature = "brotli")]
     fn brotli_round_trip_single_record() {
@@ -809,7 +809,7 @@ mod tests {
         assert!(decoder.read_record().expect("no error").is_none());
     }
 
-    // Criterion 4.2: round-trip with Zstd
+    // round-trip with Zstd
     #[test]
     #[cfg(feature = "zstd")]
     fn zstd_round_trip_single_record() {
@@ -827,7 +827,7 @@ mod tests {
         assert!(decoder.read_record().expect("no error").is_none());
     }
 
-    // Criterion 4.2: round-trip with Snappy
+    // round-trip with Snappy
     #[test]
     #[cfg(feature = "snappy")]
     fn snappy_round_trip_single_record() {
@@ -845,7 +845,7 @@ mod tests {
         assert!(decoder.read_record().expect("no error").is_none());
     }
 
-    // Criterion 4.3: compressed sizes section has the C++ format:
+    // compressed sizes section has the C++ format:
     // varint(sizes_blob_len), varint(uncompressed_sizes_len), compressed_sizes, ...
     #[test]
     #[cfg(feature = "brotli")]
@@ -872,7 +872,7 @@ mod tests {
         );
     }
 
-    // Criterion 4.3: three records -- check the sizes blob structure
+    // three records -- check the sizes blob structure
     #[test]
     #[cfg(feature = "brotli")]
     fn brotli_sizes_section_prefix_three_records() {
@@ -893,7 +893,7 @@ mod tests {
         );
     }
 
-    // Criterion 4.4: 1000 records × 1 KiB with Brotli is smaller than uncompressed
+    // 1000 records × 1 KiB with Brotli is smaller than uncompressed
     #[test]
     #[cfg(feature = "brotli")]
     fn brotli_compression_actually_compresses() {
@@ -918,7 +918,7 @@ mod tests {
         );
     }
 
-    // Criterion 4.7: unknown compression byte returns Err, not panic
+    // unknown compression byte returns Err, not panic
     #[test]
     fn unsupported_compression_byte_returns_err() {
         // Build a chunk with compression byte 0xFF by crafting raw data
@@ -933,7 +933,7 @@ mod tests {
         );
     }
 
-    // Criterion 4.8: decoded_data_size == sum of uncompressed record lengths for all compression types
+    // decoded_data_size == sum of uncompressed record lengths for all compression types
     #[test]
     #[cfg(feature = "brotli")]
     fn decoded_data_size_brotli() {
@@ -1237,7 +1237,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 3 adversarial: additional edge cases
+    // Additional uncompressed edge cases
     // -------------------------------------------------------------------------
 
     /// Encode and decode 1000 records of varying lengths (0..999 bytes).
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 4 adversarial: compressed chunk edge cases
+    // Compressed chunk edge cases
     // -------------------------------------------------------------------------
 
     /// Round-trip 5 empty records with Brotli.

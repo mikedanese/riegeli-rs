@@ -94,7 +94,7 @@ fn flush_write_more_close() {
 // Adversarial probe: 10,000 Brotli records all decodable
 // ---------------------------------------------------------------------------
 
-/// Criterion 5.8 requires all records to be readable, not just block headers valid.
+/// All records must be decodable, not just block headers valid.
 #[test]
 #[cfg(feature = "brotli")]
 fn ten_thousand_brotli_records_all_decodable() {

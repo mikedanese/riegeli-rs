@@ -642,7 +642,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.3: bytes 0–23 are a valid BlockHeader with prev=0, next=24
+    // bytes 0–23 are a valid BlockHeader with prev=0, next=24
     // -----------------------------------------------------------------------
     #[test]
     fn first_block_header_valid() {
@@ -655,7 +655,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.4: chunk at offset 24 is FileSignature with data_size=0
+    // chunk at offset 24 is FileSignature with data_size=0
     // -----------------------------------------------------------------------
     #[test]
     fn signature_chunk_at_offset_24() {
@@ -669,7 +669,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.7: after close(), write_record returns Err
+    // after close(), write_record returns Err
     // -----------------------------------------------------------------------
     #[test]
     fn write_after_close_returns_err() {
@@ -714,7 +714,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.6: flush() makes file readable with correct record count
+    // flush() makes file readable with correct record count
     // -----------------------------------------------------------------------
     #[test]
     fn flush_makes_file_readable() {
@@ -725,7 +725,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.8: 10,000 records with Brotli compression
+    // 10,000 records with Brotli compression
     // -----------------------------------------------------------------------
     #[test]
     #[cfg(feature = "brotli")]
@@ -758,7 +758,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 5.5: every block boundary has a valid BlockHeader
+    // every block boundary has a valid BlockHeader
     // -----------------------------------------------------------------------
     #[test]
     fn block_headers_at_boundaries() {
@@ -892,7 +892,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Criterion 10.8: RecordWriter with transpose -> RecordReader round-trip
+    // RecordWriter with transpose -> RecordReader round-trip
     // -----------------------------------------------------------------------
 
     /// Helper using RecordReader for full round-trip (handles both Simple and Transposed chunks).

@@ -1821,7 +1821,7 @@ mod tests {
     }
 
     // ===================================================================
-    // Sprint 12 tests: Optimized State Machine
+    // Optimized state machine tests
     // ===================================================================
 
     // -------------------------------------------------------------------
@@ -2287,7 +2287,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 13 internal tests (moved from integration tests)
+    // Multi-bucket and state-machine internals
     // -------------------------------------------------------------------------
 
     fn make_proto_3_varints_int(a: u64, b: u64, c: u64) -> Vec<u8> {
@@ -2332,7 +2332,7 @@ mod tests {
 
     /// 13.4: Multi-bucket encoder produces multiple buckets.
     #[test]
-    fn criterion_13_4_multi_bucket_produces_multiple_buckets() {
+    fn multi_bucket_produces_multiple_buckets() {
         use crate::varint::{decode_u32, decode_u64};
         let records: Vec<Vec<u8>> = (0..200)
             .map(|i| make_proto_3_varints_int(i, i * 2, i * 3))
@@ -2369,7 +2369,7 @@ mod tests {
     /// 13.4: Multi-bucket with brotli.
     #[test]
     #[cfg(feature = "brotli")]
-    fn criterion_13_4_multi_bucket_with_brotli() {
+    fn multi_bucket_with_brotli() {
         let records: Vec<Vec<u8>> = (0..100)
             .map(|i| make_proto_3_varints_int(i, i + 100, i + 200))
             .collect();
@@ -2393,7 +2393,7 @@ mod tests {
 
     /// 13.4: Multi-bucket nonproto roundtrip.
     #[test]
-    fn criterion_13_4_multi_bucket_nonproto_roundtrip() {
+    fn multi_bucket_nonproto_roundtrip() {
         let records: Vec<Vec<u8>> = (0..50)
             .map(|i| format!("record number {i}: some arbitrary data here").into_bytes())
             .collect();
@@ -2417,7 +2417,7 @@ mod tests {
 
     /// 13.4: Single bucket (default bucket_size).
     #[test]
-    fn criterion_13_4_single_bucket_default() {
+    fn single_bucket_default() {
         let records: Vec<Vec<u8>> = (0..10).map(|i| make_proto_3_varints_int(i, i, i)).collect();
         let refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
         let result = roundtrip(&refs, CompressionType::None);
@@ -2430,7 +2430,7 @@ mod tests {
     /// 13.5: Transpose+Brotli is smaller than simple+Brotli for structured data.
     #[test]
     #[cfg(feature = "brotli")]
-    fn criterion_13_5_transpose_brotli_smaller_than_simple_brotli() {
+    fn transpose_brotli_smaller_than_simple_brotli() {
         use crate::simple_chunk::SimpleChunkEncoder;
         let records: Vec<Vec<u8>> = (0..10_000)
             .map(|i| make_proto_3_varints_int(i, i * 2, i * 3))
@@ -2458,7 +2458,7 @@ mod tests {
 
     /// 13.7: Many unique fields without overflow.
     #[test]
-    fn criterion_13_7_many_unique_fields_no_overflow() {
+    fn many_unique_fields_no_overflow() {
         let mut records = Vec::new();
         for batch in 0..10 {
             let mut rec = Vec::new();
@@ -2490,7 +2490,7 @@ mod tests {
 
     /// 13.7: Corrupted chunk returns error, does not panic.
     #[test]
-    fn criterion_13_7_corrupted_num_states_no_panic() {
+    fn corrupted_num_states_no_panic() {
         use crate::simple_chunk::Chunk;
         let records = vec![make_proto_3_varints_int(1, 2, 3)];
         let mut enc = TransposeChunkEncoder::new(CompressionType::None);
@@ -2513,7 +2513,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 13 eval internal tests (moved from sprint_13_eval_adversarial.rs)
+    // Additional encoder edge cases
     // -------------------------------------------------------------------------
 
     #[cfg(feature = "brotli")]
@@ -2772,7 +2772,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 10 adversarial: additional encoder tests
+    // Additional encoder tests
     // -------------------------------------------------------------------------
 
     #[test]
@@ -2984,7 +2984,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 12 adversarial: optimized state machine additional tests
+    // Optimized state machine: additional edge cases
     // -------------------------------------------------------------------------
 
     /// Build a proto record with fields numbered from `start` to `start+count-1`.
@@ -3165,7 +3165,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 13 proptest: slow roundtrip (ignored by default)
+    // Slow roundtrip proptest (ignored by default)
     // -------------------------------------------------------------------------
 
     fn transpose_roundtrip_proptest_check(records: &[Vec<u8>], compression: CompressionType) {

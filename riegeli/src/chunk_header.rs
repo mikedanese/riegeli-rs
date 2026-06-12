@@ -247,7 +247,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 7 ChunkType TryFrom tests (moved from integration tests)
+    // ChunkType TryFrom conversions
     // -------------------------------------------------------------------------
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 17 ChunkHeader internal tests (moved from integration tests)
+    // ChunkHeader field encoding and hashing
     // -------------------------------------------------------------------------
 
     #[test]
@@ -273,9 +273,9 @@ mod tests {
         assert_eq!(h.chunk_type().unwrap(), ChunkType::FileMetadata);
     }
 
-    /// criterion_2: A file written with set_metadata has a FileMetadata chunk at byte offset 64.
+    /// A file written with set_metadata has a FileMetadata chunk at byte offset 64.
     #[test]
-    fn criterion_2_metadata_chunk_at_offset_64() {
+    fn metadata_chunk_at_offset_64() {
         use crate::constants::{BLOCK_HEADER_SIZE, CHUNK_HEADER_SIZE};
         use crate::record_writer::{RecordWriter, WriterOptions};
         use std::io::Write;
@@ -331,9 +331,9 @@ mod tests {
         assert_eq!(&data[data_start..data_end], payload.as_slice());
     }
 
-    /// criterion_8: check_file_format() does not decompress — only validates hashes.
+    /// check_file_format() does not decompress — only validates hashes.
     #[test]
-    fn criterion_8_check_file_format_does_not_decompress() {
+    fn check_file_format_does_not_decompress() {
         use crate::hash::highway_hash_64;
         use crate::record_reader::{ReaderOptions, RecordReader};
         use crate::record_writer::{RecordWriter, WriterOptions};

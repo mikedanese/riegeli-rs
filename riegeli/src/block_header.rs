@@ -148,7 +148,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 5 block boundary tests (moved from integration tests)
+    // Block boundary arithmetic
     // -------------------------------------------------------------------------
 
     use crate::block_arithmetic::add_with_overhead;
