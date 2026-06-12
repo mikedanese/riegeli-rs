@@ -358,27 +358,23 @@ impl<R: Read + Seek> RecordReader<R> {
             }
         }
 
-        // Skip record_index records.
+        // Skip record_index records. C++ `ChunkDecoder::SetIndex` clamps:
+        // an index past the chunk's end positions the reader at the end of
+        // the chunk (the next read continues with the following chunk)
+        // rather than failing — a persisted position must stay usable
+        // against a file that was re-chunked with fewer records per chunk.
         for _ in 0..pos.record_index {
             if let Some(ref mut dec) = self.current_decoder {
                 match dec.read_record()? {
                     Some(_) => {
                         self.current_record_index += 1;
                     }
-                    None => {
-                        return Err(RiegeliError::MalformedData(
-                            format!(
-                                "seek: record_index {} is out of range for chunk at {}",
-                                pos.record_index, chunk_file_pos
-                            )
-                            .into(),
-                        ));
-                    }
+                    None => break, // clamp to num_records
                 }
             }
         }
 
-        self.pos = pos;
+        self.pos = RecordPosition::new(pos.chunk_begin, self.current_record_index);
         // last_pos deliberately NOT updated — see the EOF arm above.
         Ok(())
     }
@@ -2874,6 +2870,35 @@ mod tests {
         // Sanity: a writer-produced file still opens (its signature IS the
         // canonical constant).
         RecordReader::new(Cursor::new(valid), ReaderOptions::new()).expect("valid file opens");
+    }
+
+    /// Seeking to a record_index past the end of a chunk must clamp to the
+    /// end of that chunk, matching C++ `ChunkDecoder::SetIndex` ("If
+    /// `index > num_records()`, the current index is set to
+    /// `num_records()`"): the seek succeeds and the next read continues
+    /// with the following chunk. Erroring here mislabeled a valid file as
+    /// malformed when a persisted position was applied to a file that was
+    /// re-chunked differently.
+    #[test]
+    fn seek_with_out_of_range_record_index_clamps_to_chunk_end() {
+        let data = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        let chunk_a_begin = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // 64
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        reader
+            .seek(RecordPosition::new(chunk_a_begin, 5))
+            .expect("seek past the chunk end must clamp, not error");
+        assert_eq!(
+            reader.pos(),
+            RecordPosition::new(chunk_a_begin, 1),
+            "position clamps to the chunk's num_records"
+        );
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"b"[..]),
+            "reading continues with the next chunk"
+        );
     }
 
     /// size() before the first read must restore the true initial position
