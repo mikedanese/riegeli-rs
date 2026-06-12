@@ -208,13 +208,16 @@ struct BackwardBuffer {
     /// Field values appended in record order (record 1, 2, … N).
     data: Vec<u8>,
     /// Size of each appended chunk, used to reverse at write time.
-    sizes: Vec<u32>,
+    ///
+    /// Kept as `usize` to avoid silent truncation for chunks of 4 GiB or
+    /// more (the C++ `ChainBackwardWriter` keeps 64-bit sizes throughout).
+    sizes: Vec<usize>,
 }
 
 impl BackwardBuffer {
     fn push_chunk(&mut self, chunk: &[u8]) {
         self.data.extend_from_slice(chunk);
-        self.sizes.push(chunk.len() as u32);
+        self.sizes.push(chunk.len());
     }
 
     fn len(&self) -> usize {
@@ -230,7 +233,7 @@ impl BackwardBuffer {
         out.reserve(self.data.len());
         let mut end = self.data.len();
         for &size in self.sizes.iter().rev() {
-            let start = end - size as usize;
+            let start = end - size;
             out.extend_from_slice(&self.data[start..end]);
             end = start;
         }
@@ -1642,6 +1645,39 @@ mod tests {
             vec![2, 4, 1, 3],
             "pop order must be ascending num_transitions, ties by descending dest_index"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // BackwardBuffer must track chunk sizes without truncation.
+    // -------------------------------------------------------------------
+    #[test]
+    #[ignore = "allocates more than 8 GiB; run explicitly with --ignored"]
+    fn test_backward_buffer_chunk_larger_than_4gib() {
+        // The C++ reference (ChainBackwardWriter) keeps 64-bit sizes
+        // throughout. A chunk of 2^32 + 10 bytes must be recorded with its
+        // full size, not truncated modulo 2^32.
+        let big_len: usize = (1usize << 32) + 10;
+        let big = vec![0xABu8; big_len];
+        let mut buf = BackwardBuffer::default();
+        buf.push_chunk(&big);
+        drop(big);
+        buf.push_chunk(&[1, 2, 3]);
+
+        let recorded: u64 = buf.sizes.iter().map(|&s| s as u64).sum();
+        assert_eq!(
+            recorded,
+            buf.data.len() as u64,
+            "recorded chunk sizes must cover all buffered data"
+        );
+
+        // write_to must emit chunks in reverse insertion order, covering
+        // every buffered byte.
+        let mut out = Vec::new();
+        buf.write_to(&mut out);
+        assert_eq!(out.len(), buf.data.len());
+        assert_eq!(&out[..3], &[1, 2, 3]);
+        assert_eq!(out[3], 0xAB);
+        assert_eq!(out[out.len() - 1], 0xAB);
     }
 
     // -------------------------------------------------------------------
