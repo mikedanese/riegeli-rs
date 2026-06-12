@@ -200,9 +200,63 @@ impl<R: Read + Seek> RecordReader<R> {
             });
         }
 
-        // Read and validate the first block header at offset 0.
+        // File position after the signature chunk: 24 (BH) + 40 (CH) + 0 = 64.
+        let next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE;
+
+        // Initial position matches the C++ reference: numeric 0 (the
+        // beginning of the file), not the first chunk's canonical address
+        // 24 — verified by the differential harness (an earlier criterion
+        // documented 24; the reference disagrees and wins).
+        let initial_pos = RecordPosition::new(0, 0);
+
+        let mut this = Self {
+            reader,
+            recovery: options.recovery,
+            field_projection: options.field_projection,
+            current_chunk_begin: BLOCK_HEADER_SIZE,
+            next_chunk_file_pos,
+            current_decoder: None,
+            current_record_index: 0,
+            pos: initial_pos,
+            last_pos: initial_pos,
+            at_eof: false,
+            last_record_is_valid: true,
+            stream_len,
+            last_skipped_region: None,
+            pending_trusted_end: None,
+        };
+
+        if let Err(e) = this.validate_file_preamble() {
+            // C++ treats both preamble failures as recoverable corruption
+            // (Recoverable::kFindChunk): with a recovery function the
+            // skipped region [0, resync) is reported and reading continues
+            // at the resync position — the recovery contract applies to the
+            // most common real-world corruption location (the beginning of
+            // the file) too. Without a callback, the error stands.
+            if !this.try_recover_at(0, &e) {
+                return Err(e);
+            }
+        }
+
+        Ok(this)
+    }
+
+    /// Validate the leading block header (offset 0) and the file signature
+    /// chunk (offset 24). The damage classes C++ recovers from are reported
+    /// as `MalformedData`; only I/O failures other than a short file
+    /// surface as `IoError`.
+    fn validate_file_preamble(&mut self) -> Result<(), RiegeliError> {
+        self.reader.seek(SeekFrom::Start(0))?;
+
+        // Read and validate the first block header at offset 0. A short
+        // file (1..=63 bytes) is malformed — and, like every other
+        // truncation-at-EOF, recoverable as a region running to EOF.
         let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
-        reader.read_exact(&mut bh_bytes)?;
+        if read_full(&mut self.reader, &mut bh_bytes)? < bh_bytes.len() {
+            return Err(RiegeliError::MalformedData(
+                "truncated Riegeli/records file: incomplete file preamble".into(),
+            ));
+        }
         let block_hdr = BlockHeader::from_bytes(bh_bytes);
         if !block_hdr.is_valid() {
             return Err(RiegeliError::MalformedData(
@@ -220,7 +274,11 @@ impl<R: Read + Seek> RecordReader<R> {
         // release. This matches the C++ reader, which verifies the
         // signature bytes.
         let mut ch_bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
-        reader.read_exact(&mut ch_bytes)?;
+        if read_full(&mut self.reader, &mut ch_bytes)? < ch_bytes.len() {
+            return Err(RiegeliError::MalformedData(
+                "truncated Riegeli/records file: incomplete file preamble".into(),
+            ));
+        }
         let canonical = ChunkHeader::from_parts(&[], ChunkType::FileSignature, 0, 0).to_bytes();
         if ch_bytes != canonical {
             return Err(RiegeliError::MalformedData(
@@ -228,31 +286,7 @@ impl<R: Read + Seek> RecordReader<R> {
             ));
         }
 
-        // File position after the signature chunk: 24 (BH) + 40 (CH) + 0 = 64.
-        let next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE;
-
-        // Initial position matches the C++ reference: numeric 0 (the
-        // beginning of the file), not the first chunk's canonical address
-        // 24 — verified by the differential harness (an earlier draft
-        // documented 24; the reference disagrees and wins).
-        let initial_pos = RecordPosition::new(0, 0);
-
-        Ok(Self {
-            reader,
-            recovery: options.recovery,
-            field_projection: options.field_projection,
-            current_chunk_begin: BLOCK_HEADER_SIZE,
-            next_chunk_file_pos,
-            current_decoder: None,
-            current_record_index: 0,
-            pos: initial_pos,
-            last_pos: initial_pos,
-            at_eof: false,
-            last_record_is_valid: true,
-            stream_len,
-            last_skipped_region: None,
-            pending_trusted_end: None,
-        })
+        Ok(())
     }
 
     /// Read the next record from the file.
@@ -3478,6 +3512,69 @@ mod tests {
             RecordReader::new(Cursor::new(partial), ReaderOptions::new()).is_err(),
             "a truncated preamble is still rejected"
         );
+    }
+
+    /// Corruption in the first 64 bytes (leading block header or file
+    /// signature) must be recoverable when a recovery callback is set: C++
+    /// classifies both failures as Recoverable::kFindChunk (\"missing file
+    /// signature\" / block-header hash mismatch), reports one skipped
+    /// region, and reads the rest of the file. Hard-failing in new()
+    /// silently ignored the documented recovery contract for the most
+    /// common real-world corruption location.
+    #[test]
+    fn corrupt_file_preamble_is_recoverable_with_a_callback() {
+        let n = 6;
+        let rec_size = 16320usize;
+        let lens: Vec<u64> = (0..=n)
+            .map(|k| write_chunks_past_first_block(rec_size, k).len() as u64)
+            .collect();
+        let clean = write_chunks_past_first_block(rec_size, n);
+        assert!(clean.len() as u64 > BLOCK_SIZE);
+        // The chunk straddling the first boundary; resync lands after it.
+        let c = (0..n)
+            .find(|&k| lens[k] < BLOCK_SIZE && BLOCK_SIZE < lens[k + 1])
+            .expect("some chunk must straddle the boundary");
+
+        // Corrupt (a) the leading block header's hash, (b) the signature
+        // chunk header.
+        for (label, corrupt_at) in [("block header", 2usize), ("file signature", 30usize)] {
+            let mut data = clean.clone();
+            data[corrupt_at] ^= 0xFF;
+
+            // Without recovery the constructor still fails.
+            assert!(
+                RecordReader::new(Cursor::new(data.clone()), ReaderOptions::new()).is_err(),
+                "{label}: hard error without a recovery callback"
+            );
+
+            let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+            let rc = Rc::clone(&regions);
+            let opts = ReaderOptions::new().recovery(move |region| {
+                rc.borrow_mut().push(region.clone());
+                true
+            });
+            let mut reader = RecordReader::new(Cursor::new(data), opts)
+                .unwrap_or_else(|e| panic!("{label}: must be recoverable, got {e}"));
+
+            let mut got = Vec::new();
+            while let Some(rec) = reader.read_record().expect("read ok") {
+                got.push(rec[0]);
+            }
+            let expected: Vec<u8> = (c + 1..n).map(|i| (i % 251) as u8).collect();
+            assert_eq!(
+                got, expected,
+                "{label}: records beyond the resync must be readable"
+            );
+
+            let regions = regions.borrow();
+            assert_eq!(regions.len(), 1, "{label}: one region, no cascade");
+            assert_eq!(regions[0].begin(), 0, "{label}: region begins at 0");
+            assert_eq!(
+                regions[0].end(),
+                lens[c + 1],
+                "{label}: region ends at the post-boundary chunk start"
+            );
+        }
     }
 
     /// The signature chunk is a fixed constant; a hash-valid signature
