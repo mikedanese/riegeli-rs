@@ -297,13 +297,19 @@ impl BufferCursor {
             self.scratch.resize(n, 0u8);
             return Ok(&self.scratch);
         }
-        if self.pos + n > self.data.len() {
+        // checked_add: `n` is attacker-claimed (read from a varint in the
+        // chunk); a wrapping add would let the truncation check pass and the
+        // slice below panic on 32-bit targets.
+        let end = self.pos.checked_add(n).ok_or_else(|| {
+            RiegeliError::MalformedData("buffer underflow in transpose chunk".into())
+        })?;
+        if end > self.data.len() {
             return Err(RiegeliError::MalformedData(
                 "buffer underflow in transpose chunk".into(),
             ));
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 
@@ -2523,6 +2529,24 @@ mod tests {
                 buffer_index,
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // BufferCursor bounds checks
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_read_exact_overflowing_request_is_error() {
+        // `n` comes from an attacker-controlled varint. With `pos > 0`,
+        // an unchecked `pos + n` wraps (panicking in debug builds, or
+        // passing the bounds check and panicking on the slice in release
+        // builds on 32-bit targets). It must return Err instead.
+        let mut cursor = BufferCursor::new(vec![1, 2, 3]);
+        cursor.read_exact(1).expect("in-bounds read");
+        let result = cursor.read_exact(usize::MAX);
+        assert!(
+            matches!(result, Err(RiegeliError::MalformedData(_))),
+            "oversized read_exact must fail cleanly"
+        );
     }
 
     // -------------------------------------------------------------------
