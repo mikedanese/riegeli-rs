@@ -175,6 +175,31 @@ impl<R: Read + Seek> RecordReader<R> {
         let stream_len = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
 
+        // An empty (0-byte) file is a valid riegeli file with zero records,
+        // matching the C++ reference: FailReading only marks truncation
+        // when some bytes of a chunk were consumed, so an empty source
+        // reads as a clean EOF with the reader still ok() and Close()
+        // succeeding. (1..=63 bytes IS an error in both implementations —
+        // the validation below rejects it.)
+        if stream_len == 0 {
+            return Ok(Self {
+                reader,
+                recovery: options.recovery,
+                field_projection: options.field_projection,
+                current_chunk_begin: BLOCK_HEADER_SIZE,
+                next_chunk_file_pos: BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE,
+                current_decoder: None,
+                current_record_index: 0,
+                pos: RecordPosition::new(0, 0),
+                last_pos: RecordPosition::new(0, 0),
+                at_eof: true,
+                last_record_is_valid: true,
+                stream_len,
+                last_skipped_region: None,
+                pending_trusted_end: None,
+            });
+        }
+
         // Read and validate the first block header at offset 0.
         let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
         reader.read_exact(&mut bh_bytes)?;
@@ -3430,6 +3455,29 @@ mod tests {
         let mut reader =
             RecordReader::new(Cursor::new(clean), ReaderOptions::new()).expect("reader new ok");
         assert!(reader.read_serialized_metadata().expect("ok").is_none());
+    }
+
+    /// An empty (0-byte) file is a valid riegeli file with zero records:
+    /// the C++ reference returns false from ReadRecord with the reader
+    /// still ok() (FailReading only marks truncation when some bytes of a
+    /// chunk were consumed), and Close() succeeds. Hard-failing in the
+    /// constructor broke readers pointed at files a writer has created
+    /// but not yet flushed.
+    #[test]
+    fn empty_file_is_a_valid_file_with_zero_records() {
+        let mut reader = RecordReader::new(Cursor::new(Vec::<u8>::new()), ReaderOptions::new())
+            .expect("an empty file must open as a valid zero-record file");
+        assert_eq!(reader.read_record().expect("read ok"), None);
+        assert_eq!(reader.read_record().expect("read ok"), None);
+        assert_eq!(reader.size().expect("size ok"), 0);
+
+        // A partial preamble (1..=63 bytes) is an error in both
+        // implementations — only the exactly-empty case is valid.
+        let partial = write_records(&[b"x"], WriterOptions::new())[..10].to_vec();
+        assert!(
+            RecordReader::new(Cursor::new(partial), ReaderOptions::new()).is_err(),
+            "a truncated preamble is still rejected"
+        );
     }
 
     /// The signature chunk is a fixed constant; a hash-valid signature
