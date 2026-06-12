@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 # Only used for testing against the C++ reference implementation; not for publishing to crates.io.
 publish = false
+description = "Test-only FFI bridge to the C++ riegeli reference implementation; not for external use"
 
 [dependencies]
 cxx = { workspace = true }

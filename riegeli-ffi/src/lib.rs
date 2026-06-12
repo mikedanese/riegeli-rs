@@ -1,3 +1,12 @@
+//! Test-only FFI bridge to the C++ riegeli reference implementation.
+//!
+//! This crate exists so the test suite can differential-test the Rust port
+//! against the reference: cross-language round-trips, conformance checks, and
+//! head-to-head benchmarks. It is not a supported API, it is never published
+//! (`publish = false`), and nothing outside this repository should depend on
+//! it. Interfaces here trade ergonomics and generality for exactly what the
+//! tests need, and may change without notice.
+
 #[cxx::bridge(namespace = "riegeli_ffi")]
 mod ffi {
     unsafe extern "C++" {
