@@ -480,3 +480,50 @@ fn hostile_buffers_without_buckets_rejected_by_both_implementations() {
         "unexpected C++ error: {cpp_err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Chunk flush policy parity: identical input and options must produce a
+// byte-identical file (same chunk boundaries) as the reference writer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chunk_boundaries_match_cpp_for_records_near_chunk_size() {
+    // 600-byte records with chunk_size 1000: each record is accounted as
+    // 608 bytes, so the reference flushes before every second record and
+    // produces one chunk per record.
+    let records = make_large_records(10, 600);
+    let rust_bytes = rust_write(
+        &records,
+        RustWriterOptions::new()
+            .compression(CompressionType::None)
+            .chunk_size(1000),
+    );
+    let cpp_bytes = cpp_write(
+        &records,
+        FfiWriterOptions::new()
+            .compression(Compression::None)
+            .chunk_size(1000),
+    );
+    assert_eq!(rust_bytes, cpp_bytes, "file bytes differ from reference");
+}
+
+#[test]
+fn chunk_boundaries_match_cpp_for_empty_records() {
+    // Empty records cost 8 accounted bytes each; with chunk_size 80 the
+    // reference flushes a chunk every 10 records instead of accumulating all
+    // of them until close.
+    let records = vec![Vec::new(); 25];
+    let rust_bytes = rust_write(
+        &records,
+        RustWriterOptions::new()
+            .compression(CompressionType::None)
+            .chunk_size(80),
+    );
+    let cpp_bytes = cpp_write(
+        &records,
+        FfiWriterOptions::new()
+            .compression(Compression::None)
+            .chunk_size(80),
+    );
+    assert_eq!(rust_bytes, cpp_bytes, "file bytes differ from reference");
+}

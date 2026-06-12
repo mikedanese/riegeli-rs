@@ -215,7 +215,8 @@ pub struct RecordWriter<W: Write> {
     writer: W,
     /// Compression type for data chunks.
     compression: CompressionType,
-    /// Chunk size threshold in bytes.
+    /// Desired chunk size threshold in bytes (capped so that `num_records`
+    /// cannot overflow the 56-bit field of `chunk_type_and_num_records`).
     chunk_size: u64,
     /// If non-zero, pad the file so its total size is a multiple of this value on close.
     initial_padding: u64,
@@ -233,7 +234,9 @@ pub struct RecordWriter<W: Write> {
     last_chunk_start: u64,
     /// Encoder accumulating records for the current chunk.
     encoder: ActiveEncoder,
-    /// Total uncompressed bytes accumulated in the current encoder.
+    /// Accounted size of the current chunk: the sum of record sizes plus 8
+    /// bytes of per-record overhead (mirroring `chunk_size_so_far_` in the C++
+    /// reference, which bounds the decoder's record-limits array).
     accumulated_bytes: u64,
     /// Number of records pending in the current encoder (may be >0 even when accumulated_bytes==0 for empty records).
     pending_record_count: u64,
@@ -286,7 +289,12 @@ impl<W: Write> RecordWriter<W> {
         // file_pos is now 64, which is where the next chunk starts.
 
         let compression = options.compression;
-        let chunk_size = options.chunk_size;
+        // Cap the chunk-size threshold so that `num_records` (each record is
+        // accounted as at least 8 bytes) cannot overflow the 56-bit field of
+        // `chunk_type_and_num_records`, matching the C++
+        // `desired_chunk_size_ = min(chunk_size, kMaxNumRecords * sizeof(uint64_t))`.
+        const MAX_NUM_RECORDS: u64 = u64::MAX >> 8;
+        let chunk_size = options.chunk_size.min(MAX_NUM_RECORDS * 8);
         let initial_padding = options.initial_padding;
         let final_padding = options.final_padding;
         let transpose = options.transpose;
@@ -296,7 +304,7 @@ impl<W: Write> RecordWriter<W> {
         // bucket_size = round(chunk_size * bucket_fraction), clamped to at least 1
         // and saturating at u64::MAX.
         let bucket_fraction = options.bucket_fraction.clamp(0.0, 1.0);
-        let bucket_size_rounded = (chunk_size as f64 * bucket_fraction).round();
+        let bucket_size_rounded = (options.chunk_size as f64 * bucket_fraction).round();
         let transpose_bucket_size = if bucket_size_rounded >= u64::MAX as f64 {
             u64::MAX
         } else if bucket_size_rounded >= 1.0 {
@@ -354,14 +362,29 @@ impl<W: Write> RecordWriter<W> {
     /// Write a single record.
     ///
     /// Returns `Err(RiegeliError::WriterClosed)` if the writer has been closed.
+    ///
+    /// The flush policy mirrors the C++ reference (`WriteRecordImpl`): each
+    /// record is accounted as its size plus 8 bytes (decoding a chunk stores
+    /// record positions in a limits array, so even empty records have a cost
+    /// and cannot accumulate unboundedly). The current chunk is flushed
+    /// *before* adding a record that would push the accounted size over the
+    /// threshold, and flushed after adding when not even an empty record
+    /// would still fit.
     pub fn write_record(&mut self, data: &[u8]) -> Result<(), RiegeliError> {
         if self.closed {
             return Err(RiegeliError::WriterClosed);
         }
-        self.accumulated_bytes += data.len() as u64;
+        let added_size = data.len() as u64 + 8;
+        if self.accumulated_bytes + added_size > self.chunk_size && self.accumulated_bytes > 0 {
+            self.flush_chunk()?;
+        }
+        self.accumulated_bytes += added_size;
         self.pending_record_count += 1;
         self.encoder.add_record(data)?;
-        if self.accumulated_bytes >= self.chunk_size {
+        if self.accumulated_bytes + 8 > self.chunk_size {
+            // No more records will fit in this chunk, most likely because a
+            // single record exceeds the desired chunk size. Write the chunk now
+            // to avoid keeping a large chunk in memory.
             self.flush_chunk()?;
         }
         Ok(())
@@ -980,6 +1003,76 @@ mod tests {
         let result = roundtrip_with_reader(&[&record], opts);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], record);
+    }
+
+    // -----------------------------------------------------------------------
+    // Chunk flush policy must match the C++ reference (WriteRecordImpl):
+    // each record is accounted as size + 8 bytes, a chunk is flushed BEFORE
+    // adding a record that would overflow the threshold, and flushed after
+    // adding when not even an empty record would fit.
+    // -----------------------------------------------------------------------
+
+    /// Parse the file and return `num_records` for each Simple chunk.
+    fn data_chunk_record_counts(file_data: &[u8]) -> Vec<u64> {
+        let mut pos = 64usize; // after the signature chunk
+        let mut counts = Vec::new();
+        while pos < file_data.len() {
+            if pos % BLOCK_SIZE as usize == 0 {
+                pos += BLOCK_HEADER_SIZE as usize;
+            }
+            if pos + CHUNK_HEADER_SIZE as usize > file_data.len() {
+                break;
+            }
+            let ch_bytes: [u8; 40] = file_data[pos..pos + 40].try_into().unwrap();
+            let ch = ChunkHeader::from_bytes(ch_bytes);
+            assert!(ch.is_header_valid(), "invalid chunk header at {pos}");
+            if ch.chunk_type().unwrap() == ChunkType::Simple {
+                counts.push(ch.num_records());
+            }
+            // Skip data, accounting for interleaved block headers.
+            let mut remaining = ch.data_size() as usize;
+            pos += 40;
+            while remaining > 0 {
+                if pos % BLOCK_SIZE as usize == 0 {
+                    pos += BLOCK_HEADER_SIZE as usize;
+                }
+                let space = (BLOCK_SIZE as usize - (pos % BLOCK_SIZE as usize)).min(remaining);
+                pos += space;
+                remaining -= space;
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn flush_before_adding_record_that_overflows_chunk() {
+        // chunk_size 1000: the first 600-byte record is accounted as 608 bytes;
+        // before adding the second one, 608 + 608 > 1000, so the chunk must be
+        // flushed first. The result is two chunks of one record each, never a
+        // single chunk overshooting the threshold.
+        let rec = vec![0u8; 600];
+        let data = write_file(&[&rec, &rec], WriterOptions::new().chunk_size(1000));
+        assert_eq!(data_chunk_record_counts(&data), vec![1, 1]);
+    }
+
+    #[test]
+    fn empty_records_flush_in_bounded_chunks() {
+        // Empty records still cost 8 bytes of accounting each (bounding the
+        // decoder's record-limits array), so with chunk_size 80 every 10 empty
+        // records must flush a chunk instead of accumulating indefinitely.
+        let records: Vec<&[u8]> = vec![&[]; 25];
+        let data = write_file(&records, WriterOptions::new().chunk_size(80));
+        assert_eq!(data_chunk_record_counts(&data), vec![10, 10, 5]);
+    }
+
+    #[test]
+    fn oversized_record_flushed_immediately() {
+        // A single record larger than chunk_size is flushed right after being
+        // added, so it never lingers in memory and each oversized record gets
+        // its own chunk.
+        let big = vec![0xCDu8; 5000];
+        let data = write_file(&[&big, &big], WriterOptions::new().chunk_size(1000));
+        assert_eq!(data_chunk_record_counts(&data), vec![1, 1]);
     }
 
     // -----------------------------------------------------------------------
