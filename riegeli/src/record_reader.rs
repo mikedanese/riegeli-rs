@@ -541,6 +541,10 @@ impl<R: Read + Seek> RecordReader<R> {
     /// repeated call reports the same region again (the one deliberate
     /// exception to the consumed-once cancel contract, because consuming
     /// would move a position this method promises not to touch).
+    ///
+    /// The chunk data is transpose-encoded (the C++ writer runs the serialized
+    /// `RecordsMetadata` through `TransposeEncoder`); this decodes it back to
+    /// the serialized proto bytes, mirroring `RecordReaderBase::ParseMetadata`.
     pub fn read_serialized_metadata(&mut self) -> Result<Option<Vec<u8>>, RiegeliError> {
         self.pending_trusted_end = None;
         // The metadata chunk, if present, is at offset 64 (right after signature).
@@ -600,7 +604,26 @@ impl<R: Read + Seek> RecordReader<R> {
             ));
         }
 
-        Ok(Some(data))
+        // Decode the transpose-encoded chunk data as a single record whose
+        // bytes are the serialized RecordsMetadata (the C++ reader calls
+        // TransposeDecoder::Decode with num_records = 1 and the chunk header's
+        // decoded_data_size).
+        let decode_header = crate::chunk_header::ChunkHeader::from_parts(
+            &data,
+            ChunkType::Transposed,
+            1,
+            ch.decoded_data_size(),
+        );
+        let chunk = crate::simple_chunk::Chunk {
+            header: decode_header,
+            data,
+        };
+        let mut decoder = TransposeChunkDecoder::new(chunk)?;
+        let metadata = decoder.read_record()?.ok_or_else(|| {
+            RiegeliError::MalformedData("file metadata chunk decoded to no records".into())
+        })?;
+
+        Ok(Some(metadata))
     }
 
     /// Change the active field projection, taking effect at the next chunk boundary.
