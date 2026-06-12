@@ -1939,14 +1939,27 @@ fn write_string_field(
     let buf_idx = node
         .buffer_index
         .ok_or_else(|| RiegeliError::MalformedData("string node missing buffer index".into()))?;
-    let str_len = buffers[buf_idx].read_varint32()? as usize;
-    let str_data = buffers[buf_idx].read_exact(str_len)?.to_vec();
-    let len_varint = encode_u32(str_len as u32);
+    let cursor = &mut buffers[buf_idx];
     let tag_size = node.tag_data_size;
-    let mut combined = Vec::with_capacity(tag_size + len_varint.len() + str_data.len());
+    if cursor.pruned {
+        // Pruned buffers yield zero-length strings; emit the canonical
+        // zero-length varint.
+        let mut combined = Vec::with_capacity(tag_size + 1);
+        combined.extend_from_slice(&node.tag_data[..tag_size]);
+        combined.push(0x00);
+        dest.write(&combined)?;
+        return Ok(());
+    }
+    // C++ StringCallback copies length_length + length bytes from the buffer
+    // verbatim, preserving the original (possibly non-canonical) length
+    // varint bytes rather than re-encoding the decoded length.
+    let len_start = cursor.pos;
+    let str_len = cursor.read_varint32()? as usize;
+    cursor.read_exact(str_len)?;
+    let len_and_payload = &cursor.data[len_start..cursor.pos];
+    let mut combined = Vec::with_capacity(tag_size + len_and_payload.len());
     combined.extend_from_slice(&node.tag_data[..tag_size]);
-    combined.extend_from_slice(&len_varint);
-    combined.extend_from_slice(&str_data);
+    combined.extend_from_slice(len_and_payload);
     dest.write(&combined)?;
     Ok(())
 }
@@ -2849,6 +2862,49 @@ mod tests {
         let mut dec = TransposeChunkDecoder::new(chunk).expect("subtype 137 is valid");
         let rec = dec.read_record().unwrap().expect("record");
         assert_eq!(rec, vec![0x08, 0x7F]);
+    }
+
+    // -------------------------------------------------------------------
+    // String length varint is copied verbatim (C++ StringCallback)
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_string_field_noncanonical_length_copied_verbatim() {
+        // The C++ StringCallback copies length_length + length bytes from the
+        // buffer verbatim, preserving a non-canonical length varint. Here the
+        // buffer encodes length 5 in two bytes: [0x85, 0x00].
+        let payload = b"hello";
+        let mut buf0 = vec![0x85, 0x00];
+        buf0.extend_from_slice(payload);
+
+        // Expected record: tag (field 1, length-delimited) + original length
+        // bytes + payload.
+        let mut expected = vec![0x0A, 0x85, 0x00];
+        expected.extend_from_slice(payload);
+
+        let num_states = 2u32;
+        let states = vec![
+            // State 0: String (field 1)
+            TestState::new(0x0A, num_states + 1, 0, 0),
+            // State 1: MessageStart
+            TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0),
+        ];
+
+        let chunk = build_transpose_chunk(
+            CompressionType::None,
+            1,
+            expected.len() as u64,
+            &states,
+            &[buf0],
+            &[],
+            0,
+        );
+
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("new ok");
+        let rec = dec.read_record().unwrap().expect("record");
+        assert_eq!(
+            rec, expected,
+            "non-canonical string length varint must be preserved verbatim"
+        );
     }
 
     // -------------------------------------------------------------------
