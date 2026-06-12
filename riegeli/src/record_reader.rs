@@ -516,6 +516,10 @@ impl<R: Read + Seek> RecordReader<R> {
             return Ok(None);
         }
 
+        // A metadata chunk claiming records is structurally invalid
+        // (C++ ChunkDecoder::Parse rejects it).
+        validate_special_chunk(&ch, metadata_chunk_pos, ChunkType::FileMetadata)?;
+
         // Read the chunk data. The metadata chunk header is at offset 64, far
         // from any block boundary, so its data always begins at 64 + 40.
         let data = self.read_chunk_data(metadata_chunk_pos + CHUNK_HEADER_SIZE, ch.data_size())?;
@@ -1241,10 +1245,15 @@ impl<R: Read + Seek> RecordReader<R> {
                     let _ = num_records;
                     return Ok(true);
                 }
-                ChunkType::FileSignature | ChunkType::Padding => {
-                    continue;
-                }
-                ChunkType::FileMetadata => {
+                ChunkType::FileSignature | ChunkType::Padding | ChunkType::FileMetadata => {
+                    // Validate the structural invariants before skipping
+                    // (C++ ChunkDecoder::Parse rejects these). Persistence:
+                    // rewind like the other post-trust error paths so a
+                    // bare retry re-hits this chunk.
+                    if let Err(e) = validate_special_chunk(&ch, chunk_begin, chunk_type) {
+                        self.next_chunk_file_pos = chunk_begin;
+                        return Err(e);
+                    }
                     continue;
                 }
             }
@@ -1463,7 +1472,12 @@ impl<R: Read + Seek> RecordReader<R> {
                     self.next_chunk_file_pos = chunk_end_pos;
                     return Ok(Some(ActiveDecoder::Transposed(decoder)));
                 }
-                _ => {
+                other => {
+                    // Validate the structural invariants before skipping
+                    // (C++ ChunkDecoder::Parse rejects these).
+                    if let Ok(ct) = other {
+                        validate_special_chunk(&ch, chunk_begin, ct)?;
+                    }
                     // A non-data chunk (signature, metadata, padding) is not
                     // EOF: scan forward to the next data chunk, the same way
                     // seek_numeric does. Conflating the two wedged the reader
@@ -1499,6 +1513,67 @@ impl<R: Read + Seek> RecordReader<R> {
             }
         }
     }
+}
+
+/// Validate the structural invariants of non-data chunk types, matching
+/// the C++ `ChunkDecoder::Parse`:
+///
+/// - `FileSignature`: data size, record count, and decoded data size are 0.
+/// - `FileMetadata`: record count is 0.
+/// - `Padding`: record count and decoded data size are 0.
+///
+/// Skipping such chunks unchecked diverges from the reference's
+/// accept/reject decisions, and a nonzero `num_records` additionally skews
+/// the chunk-end arithmetic (it participates in the zero-padding term), so
+/// the reader would resume at a different position than C++.
+fn validate_special_chunk(
+    ch: &ChunkHeader,
+    chunk_begin: u64,
+    chunk_type: ChunkType,
+) -> Result<(), RiegeliError> {
+    match chunk_type {
+        ChunkType::FileSignature => {
+            if ch.data_size() != 0 || ch.num_records() != 0 || ch.decoded_data_size() != 0 {
+                return Err(RiegeliError::MalformedData(
+                    format!(
+                        "invalid file signature chunk at {chunk_begin}: data size {}, \
+                         number of records {}, and decoded data size {} must all be zero",
+                        ch.data_size(),
+                        ch.num_records(),
+                        ch.decoded_data_size()
+                    )
+                    .into(),
+                ));
+            }
+        }
+        ChunkType::FileMetadata => {
+            if ch.num_records() != 0 {
+                return Err(RiegeliError::MalformedData(
+                    format!(
+                        "invalid file metadata chunk at {chunk_begin}: \
+                         number of records is not zero: {}",
+                        ch.num_records()
+                    )
+                    .into(),
+                ));
+            }
+        }
+        ChunkType::Padding => {
+            if ch.num_records() != 0 || ch.decoded_data_size() != 0 {
+                return Err(RiegeliError::MalformedData(
+                    format!(
+                        "invalid padding chunk at {chunk_begin}: number of records {} \
+                         and decoded data size {} must both be zero",
+                        ch.num_records(),
+                        ch.decoded_data_size()
+                    )
+                    .into(),
+                ));
+            }
+        }
+        ChunkType::Simple | ChunkType::Transposed => {}
+    }
+    Ok(())
 }
 
 /// Return the next block boundary strictly after `pos`.
@@ -2214,6 +2289,84 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// A hash-valid chunk header with an arbitrary type/claims, followed by
+    /// `data` bytes (whose hash is stored in the header).
+    fn special_chunk(
+        chunk_type: ChunkType,
+        data: &[u8],
+        num_records: u64,
+        decoded_data_size: u64,
+    ) -> Vec<u8> {
+        let mut out = ChunkHeader::from_parts(data, chunk_type, num_records, decoded_data_size)
+            .to_bytes()
+            .to_vec();
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// Non-data chunks must satisfy the structural invariants the C++
+    /// ChunkDecoder::Parse enforces: a file signature chunk has zero
+    /// data/records/decoded size, a metadata chunk has zero records, a
+    /// padding chunk has zero records and decoded size. Skipping them
+    /// unchecked diverged from the reference's accept/reject decisions,
+    /// and a hostile padding num_records skewed the chunk-end arithmetic
+    /// (it participates in the zero-padding term), desynchronizing the
+    /// reader's position from C++'s after recovery.
+    #[test]
+    fn special_chunks_with_nonzero_claims_are_rejected() {
+        for (label, bad_chunk) in [
+            (
+                "padding with records",
+                special_chunk(ChunkType::Padding, &[], 1, 0),
+            ),
+            (
+                "padding with decoded size",
+                special_chunk(ChunkType::Padding, &[], 0, 7),
+            ),
+            (
+                "mid-file signature with records",
+                special_chunk(ChunkType::FileSignature, &[], 2, 0),
+            ),
+            (
+                "metadata with records",
+                special_chunk(ChunkType::FileMetadata, &[], 1, 0),
+            ),
+        ] {
+            let mut data = write_records(&[b"only"], WriterOptions::new());
+            data.extend_from_slice(&bad_chunk);
+
+            let mut reader =
+                RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+            assert_eq!(
+                reader.read_record().expect("read ok").as_deref(),
+                Some(&b"only"[..]),
+                "{label}"
+            );
+            assert!(
+                reader.read_record().is_err(),
+                "{label}: structurally invalid special chunk must be rejected, not skipped"
+            );
+        }
+    }
+
+    /// The metadata read path shares the validation: a metadata chunk
+    /// claiming records is invalid (C++ ChunkDecoder::Parse).
+    #[test]
+    fn metadata_chunk_with_records_is_rejected_by_metadata_read() {
+        // [bh][sig][metadata chunk claiming 1 record][data chunk "x"]
+        let base = write_records(&[b"x"], WriterOptions::new());
+        let mut data = base[..64].to_vec();
+        data.extend_from_slice(&special_chunk(ChunkType::FileMetadata, b"\x0a\x00", 1, 2));
+        data.extend_from_slice(&base[64..]);
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert!(
+            reader.read_serialized_metadata().is_err(),
+            "metadata chunk claiming records must be rejected"
+        );
     }
 
     /// Cancel semantics (C++ shape, adopted after the empirical trace):
