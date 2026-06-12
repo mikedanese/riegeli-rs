@@ -105,3 +105,143 @@ fn adv_16_make_records_are_distinct() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-language metadata wire format: the FileMetadata chunk carries a
+// transpose-encoded RecordsMetadata (with num_records = 0 and
+// decoded_data_size = serialized size), so metadata written by either
+// implementation must be readable by the other.
+// ---------------------------------------------------------------------------
+
+fn sample_serialized_metadata() -> Vec<u8> {
+    // A small but non-trivial serialized proto payload:
+    // field 1 (record_type_name): "some.package.Message"
+    let mut bytes = vec![0x0A, 20];
+    bytes.extend_from_slice(b"some.package.Message");
+    bytes
+}
+
+#[test]
+fn metadata_written_by_rust_is_readable_by_cpp() {
+    use std::io::Cursor;
+
+    let metadata = sample_serialized_metadata();
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    {
+        let mut w = riegeli::RecordWriter::new(
+            &mut buf,
+            riegeli::WriterOptions::new().set_serialized_metadata(metadata.clone()),
+        )
+        .expect("rust writer");
+        w.write_record(b"payload-record").expect("write_record");
+        w.flush().expect("flush");
+    }
+    let file_bytes = buf.into_inner();
+
+    let mut reader = riegeli_ffi::RecordReader::new(&file_bytes).expect("cpp reader");
+    let got = reader
+        .read_serialized_metadata()
+        .expect("cpp read_serialized_metadata");
+    assert_eq!(
+        got.as_deref(),
+        Some(metadata.as_slice()),
+        "metadata read back by the reference reader differs"
+    );
+    // Records must still be readable after the metadata chunk.
+    let rec = reader.read_record().expect("cpp read_record");
+    assert_eq!(rec.as_deref(), Some(&b"payload-record"[..]));
+}
+
+// The reference writer compresses the metadata chunk with its default codec
+// (Brotli), so decoding it requires the brotli feature.
+#[test]
+#[cfg(feature = "brotli")]
+fn metadata_written_by_cpp_is_readable_by_rust() {
+    use std::io::Cursor;
+
+    let metadata = sample_serialized_metadata();
+    // Leave the reference writer's default compression in place: the rust
+    // reader must handle a compressed transpose-encoded metadata chunk.
+    let mut w = riegeli_ffi::RecordWriter::new(
+        riegeli_ffi::WriterOptions::new().serialized_metadata(&metadata),
+    )
+    .expect("cpp writer");
+    w.write_record(b"payload-record").expect("cpp write_record");
+    let file_bytes = w.close().expect("cpp close");
+
+    let mut reader =
+        riegeli::RecordReader::new(Cursor::new(file_bytes), riegeli::ReaderOptions::new())
+            .expect("rust reader");
+    let got = reader
+        .read_serialized_metadata()
+        .expect("rust read_serialized_metadata");
+    assert_eq!(
+        got.as_deref(),
+        Some(metadata.as_slice()),
+        "metadata read back by the rust reader differs"
+    );
+    let rec = reader.read_record().expect("rust read_record");
+    assert_eq!(rec.as_deref(), Some(&b"payload-record"[..]));
+}
+
+// Uncompressed variant of the test above: covers the C++-written metadata
+// read path in builds without the brotli feature.
+#[test]
+fn metadata_written_by_cpp_uncompressed_is_readable_by_rust() {
+    use std::io::Cursor;
+
+    let metadata = sample_serialized_metadata();
+    let mut w = riegeli_ffi::RecordWriter::new(
+        riegeli_ffi::WriterOptions::new()
+            .compression(riegeli_ffi::Compression::None)
+            .serialized_metadata(&metadata),
+    )
+    .expect("cpp writer");
+    w.write_record(b"payload-record").expect("cpp write_record");
+    let file_bytes = w.close().expect("cpp close");
+
+    let mut reader =
+        riegeli::RecordReader::new(Cursor::new(file_bytes), riegeli::ReaderOptions::new())
+            .expect("rust reader");
+    let got = reader
+        .read_serialized_metadata()
+        .expect("rust read_serialized_metadata");
+    assert_eq!(
+        got.as_deref(),
+        Some(metadata.as_slice()),
+        "metadata read back by the rust reader differs"
+    );
+    let rec = reader.read_record().expect("rust read_record");
+    assert_eq!(rec.as_deref(), Some(&b"payload-record"[..]));
+}
+
+#[test]
+fn metadata_file_bytes_match_cpp_writer() {
+    use std::io::Cursor;
+
+    // With identical options the metadata chunk must be byte-identical to the
+    // reference writer's output (transpose-encoded chunk data, num_records 0).
+    let metadata = sample_serialized_metadata();
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    {
+        let mut w = riegeli::RecordWriter::new(
+            &mut buf,
+            riegeli::WriterOptions::new().set_serialized_metadata(metadata.clone()),
+        )
+        .expect("rust writer");
+        w.write_record(b"payload-record").expect("write_record");
+        w.flush().expect("flush");
+    }
+    let rust_bytes = buf.into_inner();
+
+    let mut w = riegeli_ffi::RecordWriter::new(
+        riegeli_ffi::WriterOptions::new()
+            .compression(riegeli_ffi::Compression::None)
+            .serialized_metadata(&metadata),
+    )
+    .expect("cpp writer");
+    w.write_record(b"payload-record").expect("cpp write_record");
+    let cpp_bytes = w.close().expect("cpp close");
+
+    assert_eq!(rust_bytes, cpp_bytes, "file bytes differ from reference");
+}

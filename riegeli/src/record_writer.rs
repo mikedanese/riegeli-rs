@@ -346,14 +346,24 @@ impl<W: Write> RecordWriter<W> {
         };
 
         // Write the optional FileMetadata chunk immediately after the signature chunk.
+        //
+        // Matches the C++ reference (RecordWriterBase::Worker::EncodeMetadata):
+        // the serialized RecordsMetadata is itself transpose-encoded with the
+        // configured compressor (default tuning, i.e. a single bucket), and the
+        // chunk header carries num_records = 0 with decoded_data_size equal to
+        // the serialized metadata size.
         if let Some(metadata_bytes) = options.metadata {
+            let mut metadata_encoder =
+                TransposeChunkEncoder::new(compression).compress_opts(compress_opts);
+            metadata_encoder.add_record(&metadata_bytes)?;
+            let encoded = metadata_encoder.encode()?;
             let metadata_header = ChunkHeader::from_parts(
-                &metadata_bytes,
+                &encoded.data,
                 ChunkType::FileMetadata,
                 0,
                 metadata_bytes.len() as u64,
             );
-            this.write_chunk_raw(&metadata_header, &metadata_bytes)?;
+            this.write_chunk_raw(&metadata_header, &encoded.data)?;
         }
 
         Ok(this)

@@ -325,10 +325,23 @@ mod tests {
             "expected FileMetadata chunk at offset 64"
         );
 
-        let data_start = metadata_chunk_pos as usize + 40;
-        let data_end = data_start + ch.data_size() as usize;
-        assert!(data.len() >= data_end, "file truncated");
-        assert_eq!(&data[data_start..data_end], payload.as_slice());
+        // The chunk data is transpose-encoded; the header carries
+        // num_records = 0 and decoded_data_size = serialized metadata size.
+        assert_eq!(ch.num_records(), 0, "metadata chunk must claim 0 records");
+        assert_eq!(
+            ch.decoded_data_size(),
+            payload.len() as u64,
+            "decoded_data_size must be the serialized metadata size"
+        );
+
+        // The payload round-trips through the reader.
+        use crate::record_reader::{ReaderOptions, RecordReader};
+        let mut reader =
+            RecordReader::new(std::io::Cursor::new(data), ReaderOptions::new()).expect("reader");
+        let got = reader
+            .read_serialized_metadata()
+            .expect("read_serialized_metadata");
+        assert_eq!(got.as_deref(), Some(payload.as_slice()));
     }
 
     /// check_file_format() does not decompress — only validates hashes.
