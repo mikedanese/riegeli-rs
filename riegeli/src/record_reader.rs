@@ -208,7 +208,7 @@ impl<R: Read + Seek> RecordReader<R> {
 
         // Initial position matches the C++ reference: numeric 0 (the
         // beginning of the file), not the first chunk's canonical address
-        // 24 — verified by the differential harness (an earlier criterion
+        // 24 — verified by the differential harness (an earlier draft
         // documented 24; the reference disagrees and wins).
         let initial_pos = RecordPosition::new(0, 0);
 
@@ -1472,7 +1472,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.1: read back a RecordWriter-written file
+    // read back a RecordWriter-written file
     // -------------------------------------------------------------------------
     #[test]
     fn roundtrip_basic() {
@@ -1492,7 +1492,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.1: 100 records
+    // 100 records
     // -------------------------------------------------------------------------
     #[test]
     fn roundtrip_100_records() {
@@ -1511,7 +1511,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.3: pos() at start
+    // pos() at start
     // -------------------------------------------------------------------------
     #[test]
     fn pos_at_start() {
@@ -1521,14 +1521,14 @@ mod tests {
 
         let pos = reader.pos();
         // Matches the C++ reference: initial position is numeric 0 (the
-        // earlier criterion said 24; the differential harness showed the
+        // earlier draft said 24; the differential harness showed the
         // reference returns 0 and the reference wins).
         assert_eq!(pos.numeric(), 0, "initial position is numeric 0");
         assert_eq!(pos.record_index, 0, "record_index should be 0");
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.4: last_pos().numeric() → seek_numeric → same record
+    // last_pos().numeric() → seek_numeric → same record
     // -------------------------------------------------------------------------
     #[test]
     fn seek_numeric_roundtrip() {
@@ -1565,7 +1565,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.5: corruption handling
+    // corruption handling
     // -------------------------------------------------------------------------
     #[test]
     fn corruption_no_recovery() {
@@ -1659,7 +1659,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.6: seek_numeric to middle of chunk
+    // seek_numeric to middle of chunk
     // -------------------------------------------------------------------------
     #[test]
     fn seek_numeric_mid_chunk() {
@@ -1685,7 +1685,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.7: read_metadata returns None
+    // read_metadata returns None
     // -------------------------------------------------------------------------
     #[test]
     fn read_metadata_returns_none() {
@@ -1697,7 +1697,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 6.8: EOF returns Ok(None), then Ok(None) again
+    // EOF returns Ok(None), then Ok(None) again
     // -------------------------------------------------------------------------
     #[test]
     fn eof_returns_none_repeatedly() {
@@ -1743,7 +1743,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Criterion 9.8: Interleaved simple and transposed chunks
+    // Interleaved simple and transposed chunks
     // -------------------------------------------------------------------------
     #[test]
     fn interleaved_simple_and_transposed() {

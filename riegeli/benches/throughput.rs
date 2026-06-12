@@ -29,7 +29,7 @@
 
 use std::io::Cursor;
 
-use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use pprof::criterion::{Output, PProfProfiler};
 
 use riegeli::{CompressionType, ReaderOptions, RecordReader, RecordWriter, WriterOptions};
@@ -63,7 +63,7 @@ fn make_records() -> Vec<Vec<u8>> {
             // Field 2 (tag=0x12, length-delimited): padding to fill RECORD_SIZE
             rec.push(0x12);
             let remaining = RECORD_SIZE.saturating_sub(rec.len() + 2); // 2 bytes for tag + length
-            // length as varint (will be < 128 for typical sizes, but handle >127)
+                                                                       // length as varint (will be < 128 for typical sizes, but handle >127)
             let len = remaining;
             if len < 0x80 {
                 rec.push(len as u8);
@@ -263,7 +263,7 @@ fn bench_read(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_projection_placeholder(c: &mut Criterion) {
-    // Placeholder for transpose+brotli:6+projection (Sprint 18).
+    // Placeholder for transpose+brotli:6+projection.
     // This benchmark exists so the 9-row matrix is visible, but it currently
     // just reads without projection (same as transpose_brotli_6/read).
     let records = make_records();

@@ -116,7 +116,7 @@ pub fn has_data_buffer(tag: u32, subtype: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Additional constants for future sprints
+// Additional format constants
 // ---------------------------------------------------------------------------
 
 /// Maximum depth of nested submessages to decompose. Deeper nesting is
@@ -135,14 +135,13 @@ mod tests {
 
     #[test]
     fn test_has_subtype_varint() {
-        // Criterion 8.2: only varint wire type has subtypes.
+        // only varint wire type has subtypes.
         assert!(has_subtype(make_tag(1, WireType::Varint)));
         assert!(has_subtype(make_tag(100, WireType::Varint)));
     }
 
     #[test]
     fn test_has_subtype_non_varint() {
-        // Criterion 8.2
         assert!(!has_subtype(make_tag(1, WireType::Fixed32)));
         assert!(!has_subtype(make_tag(1, WireType::Fixed64)));
         assert!(!has_subtype(make_tag(1, WireType::LengthDelimited)));
@@ -154,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_has_data_buffer_varint_buffered() {
-        // Criterion 8.3: VARINT_1 has a data buffer.
+        // VARINT_1 has a data buffer.
         assert!(has_data_buffer(
             make_tag(1, WireType::Varint),
             subtype::VARINT_1
@@ -167,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_has_data_buffer_varint_inline() {
-        // Criterion 8.3: VARINT_INLINE_0 does NOT have a data buffer.
+        // VARINT_INLINE_0 does NOT have a data buffer.
         assert!(!has_data_buffer(
             make_tag(1, WireType::Varint),
             subtype::VARINT_INLINE_0
@@ -192,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_has_data_buffer_length_delimited_string() {
-        // Criterion 8.3: LENGTH_DELIMITED_STRING has a data buffer.
+        // LENGTH_DELIMITED_STRING has a data buffer.
         assert!(has_data_buffer(
             make_tag(1, WireType::LengthDelimited),
             subtype::LENGTH_DELIMITED_STRING
@@ -201,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_has_data_buffer_length_delimited_submessage() {
-        // Criterion 8.3: END_OF_SUBMESSAGE does NOT have a data buffer.
+        // END_OF_SUBMESSAGE does NOT have a data buffer.
         assert!(!has_data_buffer(
             make_tag(1, WireType::LengthDelimited),
             subtype::LENGTH_DELIMITED_END_OF_SUBMESSAGE
@@ -256,7 +255,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Sprint 8 adversarial: additional internal predicate tests
+    // Additional internal predicate tests
     // -------------------------------------------------------------------------
 
     #[test]

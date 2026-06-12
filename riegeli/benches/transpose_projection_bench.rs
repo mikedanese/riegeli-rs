@@ -1,4 +1,4 @@
-//! Criterion benchmarks for transpose projection optimizations (Phase 6).
+//! Criterion benchmarks for transpose projection optimizations.
 //!
 //! Measures throughput improvement from projection-during-decode vs.
 //! the pre-phase-6 baseline of full decode + post-decode field filtering.
@@ -10,7 +10,7 @@
 
 use std::io::Cursor;
 
-use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 
 use riegeli::{
     CompressionType, Field, FieldProjection, ReaderOptions, RecordReader, RecordWriter,

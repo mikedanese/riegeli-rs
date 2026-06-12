@@ -1,4 +1,4 @@
-//! Adversarial tests for transpose encoding edge cases.
+//! Transpose encoding edge cases.
 
 mod common;
 
