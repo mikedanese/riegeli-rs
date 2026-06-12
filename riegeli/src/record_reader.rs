@@ -572,21 +572,45 @@ impl<R: Read + Seek> RecordReader<R> {
 
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let (chunk_pos, _num_records) = chunks[mid];
 
-            // Read just the first record of this chunk to probe.
-            let first_record = self.read_record_at(chunk_pos, 0)?;
-
-            match test(&first_record) {
-                Ordering::Less => {
-                    // Target is after this chunk's first record → search right half.
-                    lo = mid + 1;
+            // Probe the first record of chunks[mid]. An unreadable pivot
+            // (e.g. a chunk skipped under recovery because its data hash
+            // does not match) is UNORDERED — C++ SearchImpl declares the
+            // skipped region unordered and the binary search shrinks around
+            // it — so scan right for the nearest readable pivot instead of
+            // judging fabricated record content.
+            let mut probe = mid;
+            let mut ordering = None;
+            while probe < hi {
+                let (chunk_pos, _num_records) = chunks[probe];
+                match self.read_record_at(chunk_pos, 0)? {
+                    Some(first_record) => {
+                        ordering = Some((probe, chunk_pos, test(&first_record)));
+                        break;
+                    }
+                    None => probe += 1,
                 }
-                Ordering::Greater => {
-                    // Target is before this chunk's first record → search left half.
+            }
+
+            match ordering {
+                None => {
+                    // Everything in [mid, hi) is unordered (unreadable): the
+                    // target, if findable at all, is in the left half.
                     hi = mid;
                 }
-                Ordering::Equal => {
+                Some((probe, _, Ordering::Less)) => {
+                    // Target is after this chunk's first record → search
+                    // right of the probe (chunks [mid, probe) are unordered).
+                    lo = probe + 1;
+                }
+                Some((_, _, Ordering::Greater)) => {
+                    // Target is before this chunk's first record → search
+                    // left half. Unordered chunks in [mid, probe) cannot be
+                    // judged, so a target inside them is reported absent
+                    // (the same outcome C++ gives for skipped regions).
+                    hi = mid;
+                }
+                Some((_, chunk_pos, Ordering::Equal)) => {
                     // First record of this chunk matches. Seek to it and return.
                     let target = crate::record_position::RecordPosition::new(chunk_pos, 0);
                     self.seek(target)?;
@@ -673,19 +697,26 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Read the record at `record_index` within the chunk at `chunk_pos`.
     ///
     /// Uses `seek()` to position at the exact record. Does NOT preserve reader state.
+    ///
+    /// Returns `Ok(None)` when the requested record could not be read AS a
+    /// record of that chunk — the chunk was skipped under recovery or the
+    /// read fell through to a different chunk. `None` is distinct from an
+    /// empty record (empty records are legal), so callers can treat the
+    /// probe as unordered instead of judging fabricated content.
     fn read_record_at(
         &mut self,
         chunk_pos: u64,
         record_index: u64,
-    ) -> Result<Vec<u8>, RiegeliError> {
+    ) -> Result<Option<Vec<u8>>, RiegeliError> {
         let target = crate::record_position::RecordPosition::new(chunk_pos, record_index);
         self.seek(target)?;
         match self.read_record()? {
             // Guard against misattribution: if the read fell through to a
-            // different chunk (e.g. the requested chunk had no records),
-            // report absence rather than another chunk's record.
-            Some(rec) if self.current_chunk_begin == chunk_pos => Ok(rec),
-            _ => Ok(Vec::new()),
+            // different chunk (e.g. the requested chunk had no records or
+            // was skipped by recovery), report absence rather than another
+            // chunk's record.
+            Some(rec) if self.current_chunk_begin == chunk_pos => Ok(Some(rec)),
+            _ => Ok(None),
         }
     }
 
@@ -714,7 +745,13 @@ impl<R: Read + Seek> RecordReader<R> {
 
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let rec = self.read_record_at(chunk_pos, mid)?;
+            let rec = match self.read_record_at(chunk_pos, mid)? {
+                Some(rec) => rec,
+                // The chunk became unreadable (skipped under recovery):
+                // chunks decode all-or-nothing, so none of its records can
+                // be judged and the target cannot be found here.
+                None => return Ok(false),
+            };
 
             match test(&rec) {
                 Ordering::Less => {
@@ -2613,6 +2650,33 @@ mod tests {
             .expect("reader new ok")
         };
         assert!(reader2.search(|rec| rec.cmp(&b"a"[..])).expect("search ok"));
+    }
+
+    /// A chunk whose header is valid but whose DATA is corrupt passes the
+    /// header-only collection scan, so the binary search can pick it as a
+    /// pivot. Probing it under recovery used to fabricate an empty record
+    /// for the comparator (`b""` compares Less than every non-empty
+    /// target), discarding the left half of the search — and a present
+    /// target was reported absent. C++ declares such a probe unordered and
+    /// the search shrinks around it without judging fabricated content.
+    #[test]
+    fn search_does_not_judge_fabricated_records_for_unreadable_pivots() {
+        let two = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        let three = write_records(&[b"a", b"b", b"c"], WriterOptions::new().chunk_size(1));
+        let mut data = three.clone();
+        data[two.len() - 1] ^= 0xFF; // corrupt chunk "b"'s DATA (header stays valid)
+
+        let opts = ReaderOptions::new().recovery(|_region| true);
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+        let found = reader.search(|rec| rec.cmp(&b"a"[..])).expect("search ok");
+        assert!(
+            found,
+            "target in a readable chunk left of the unreadable pivot must be found"
+        );
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"a"[..])
+        );
     }
 
     /// Seeking to a non-data chunk's address (here: the signature chunk of
