@@ -742,10 +742,13 @@ fn j_aliased_field_in_excluded_group_known_divergent() {
 /// top-level (included) occurrence comes FIRST in the record, so in
 /// backward decode the shared node's first resolution happens INSIDE the
 /// excluded group, and the reference caches the exclusion: the included
-/// top-level value is silently DROPPED. Together the two cases show the
-/// reference's aliased-field behavior is order-dependent between leaking
-/// excluded data and dropping included data; this implementation is
-/// context-correct in both orders. Both shapes pinned.
+/// top-level value is silently DROPPED. This implementation keeps the
+/// included occurrence, but since excluded occurrences never read their
+/// data buffer (C++ kEmptyReader semantics), the included occurrence
+/// reads the next unconsumed value from the shared buffer — the one the
+/// encoder wrote for the excluded interior occurrence. Together the two
+/// cases show aliased-field projection is order-dependent in both
+/// implementations; both shapes pinned.
 #[test]
 fn j2_aliased_field_mirrored_order_known_divergent() {
     // record: f3: 9, f4-group{ f3: 7 } — top-level occurrence FIRST.
@@ -764,8 +767,9 @@ fn j2_aliased_field_mirrored_order_known_divergent() {
 
     assert_eq!(
         rust_out,
-        vec![encode_varint_field(3, 9)],
-        "this implementation keeps the included top-level occurrence"
+        vec![encode_varint_field(3, 7)],
+        "this implementation keeps the included top-level occurrence, \
+         reading the next unconsumed value from the aliased buffer"
     );
     assert_eq!(
         cpp_out,
