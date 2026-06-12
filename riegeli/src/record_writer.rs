@@ -55,7 +55,7 @@ impl WriterOptions {
     /// - `CompressionType::None`
     /// - chunk size: 1 MiB
     /// - no padding
-    /// - bucket_fraction: 1.0 (single bucket)
+    /// - bucket_fraction: 1.0 (bucket_size = chunk_size)
     pub fn new() -> Self {
         Self {
             compression: CompressionType::None,
@@ -162,9 +162,13 @@ impl WriterOptions {
 
     /// Set the bucket fraction for transpose encoding.
     ///
-    /// `bucket_size = chunk_size * bucket_fraction`. Values ≤ 0.0 are clamped to
-    /// a minimum of `4096 / chunk_size`. Values > 1.0 are clamped to 1.0 (single
-    /// bucket). The default is 1.0.
+    /// `bucket_size = round(chunk_size * bucket_fraction)`, clamped to a minimum
+    /// of 1 byte (a fraction of 0.0 places every buffer in its own bucket).
+    /// Values outside `[0.0, 1.0]` are clamped into that range. The default is
+    /// 1.0 (one bucket per chunk's worth of data).
+    ///
+    /// Smaller buckets enable finer-grained skipping during field projection at
+    /// the cost of slightly worse compression.
     pub fn bucket_fraction(mut self, fraction: f64) -> Self {
         self.bucket_fraction = fraction.clamp(0.0, 1.0);
         self
@@ -287,14 +291,18 @@ impl<W: Write> RecordWriter<W> {
         let final_padding = options.final_padding;
         let transpose = options.transpose;
 
-        // Compute bucket_size for transpose encoding.
-        // bucket_fraction is clamped to (0.0, 1.0]; values ≤ 0.0 use a 4096-byte minimum.
+        // Compute bucket_size for transpose encoding. Matches the C++ reference
+        // (RecordWriterBase::Worker::MakeChunkEncoder):
+        // bucket_size = round(chunk_size * bucket_fraction), clamped to at least 1
+        // and saturating at u64::MAX.
         let bucket_fraction = options.bucket_fraction.clamp(0.0, 1.0);
-        let transpose_bucket_size = if bucket_fraction <= 0.0 || bucket_fraction >= 1.0 {
+        let bucket_size_rounded = (chunk_size as f64 * bucket_fraction).round();
+        let transpose_bucket_size = if bucket_size_rounded >= u64::MAX as f64 {
             u64::MAX
+        } else if bucket_size_rounded >= 1.0 {
+            bucket_size_rounded as u64
         } else {
-            let bs = (chunk_size as f64 * bucket_fraction) as u64;
-            bs.max(256)
+            1
         };
 
         let compress_opts = CompressOptions {
@@ -972,6 +980,35 @@ mod tests {
         let result = roundtrip_with_reader(&[&record], opts);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], record);
+    }
+
+    // -----------------------------------------------------------------------
+    // bucket_fraction -> bucket_size mapping must match the C++ reference:
+    // bucket_size = round(chunk_size * bucket_fraction), clamped to at least 1.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn bucket_size_matches_reference_semantics() {
+        fn bucket_size_for(chunk_size: u64, fraction: f64) -> u64 {
+            let writer = RecordWriter::new(
+                std::io::Cursor::new(Vec::<u8>::new()),
+                WriterOptions::new()
+                    .chunk_size(chunk_size)
+                    .transpose(true)
+                    .bucket_fraction(fraction),
+            )
+            .expect("writer ok");
+            writer.transpose_bucket_size
+        }
+
+        // Fraction 1.0: one bucket per chunk's worth of data, not unbounded.
+        assert_eq!(bucket_size_for(1 << 20, 1.0), 1 << 20);
+        // Fraction 0.0: every buffer gets its own bucket (bucket_size 1).
+        assert_eq!(bucket_size_for(1 << 20, 0.0), 1);
+        // No artificial 256-byte floor.
+        assert_eq!(bucket_size_for(100, 0.5), 50);
+        // Rounding to nearest.
+        assert_eq!(bucket_size_for(101, 0.5), 51);
+        assert_eq!(bucket_size_for(1000, 0.3), 300);
     }
 
     #[test]
