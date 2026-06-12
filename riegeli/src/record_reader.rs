@@ -1281,15 +1281,31 @@ impl<R: Read + Seek> RecordReader<R> {
         let mut file_pos = chunk_begin;
         let mut bytes = [0u8; 40]; // CHUNK_HEADER_SIZE
         let mut filled: usize = 0;
+        // Whether any byte of this chunk's span (including an interleaved
+        // block header) has been consumed. Distinguishes a clean EOF (the
+        // stream ends exactly where the chunk would begin — C++ ReadRecord
+        // returns false with the reader still ok()) from TRUNCATION (the
+        // stream ends after part of the chunk was read — C++ sets
+        // truncated_ in FailReading and fails with "Truncated
+        // Riegeli/records file"). Mapping the partial case to EOF made a
+        // file cut off mid-header read back as a complete, shorter file.
+        let mut consumed_any = false;
 
         while filled < bytes.len() {
             if is_block_boundary(file_pos) {
                 self.reader.seek(SeekFrom::Start(file_pos))?;
                 let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
-                match self.reader.read_exact(&mut bh_bytes) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                    Err(e) => return Err(e.into()),
+                let n = read_full(&mut self.reader, &mut bh_bytes)?;
+                if n < bh_bytes.len() {
+                    if n == 0 && !consumed_any {
+                        return Ok(None); // clean EOF at the chunk's beginning
+                    }
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "truncated Riegeli/records file: incomplete chunk at {chunk_begin}"
+                        )
+                        .into(),
+                    ));
                 }
                 let bh = BlockHeader::from_bytes(bh_bytes);
                 if !bh.is_valid() {
@@ -1297,18 +1313,25 @@ impl<R: Read + Seek> RecordReader<R> {
                         format!("invalid block header hash at file position {file_pos}").into(),
                     ));
                 }
+                consumed_any = true;
                 file_pos += BLOCK_HEADER_SIZE;
             }
             let until_boundary = BLOCK_SIZE - (file_pos % BLOCK_SIZE);
             let to_read = ((bytes.len() - filled) as u64).min(until_boundary) as usize;
             self.reader.seek(SeekFrom::Start(file_pos))?;
-            match self.reader.read_exact(&mut bytes[filled..filled + to_read]) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(e.into()),
+            let n = read_full(&mut self.reader, &mut bytes[filled..filled + to_read])?;
+            if n < to_read {
+                if n == 0 && !consumed_any {
+                    return Ok(None); // clean EOF at the chunk's beginning
+                }
+                return Err(RiegeliError::MalformedData(
+                    format!("truncated Riegeli/records file: incomplete chunk at {chunk_begin}")
+                        .into(),
+                ));
             }
-            filled += to_read;
-            file_pos += to_read as u64;
+            consumed_any = true;
+            filled += n;
+            file_pos += n as u64;
         }
 
         let ch = ChunkHeader::from_bytes(bytes);
@@ -1571,6 +1594,23 @@ fn validate_special_chunk(
         ChunkType::Simple | ChunkType::Transposed => {}
     }
     Ok(())
+}
+
+/// Read as many bytes as are available into `buf`, returning the count.
+/// Unlike `read_exact`, a short read at end of stream is reported through
+/// the count instead of an `UnexpectedEof` error, so callers can tell a
+/// clean EOF (0 bytes) from a truncated structure (partial bytes).
+fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 /// Return the next block boundary strictly after `pos`.
@@ -2363,6 +2403,70 @@ mod tests {
         assert!(
             reader.read_serialized_metadata().is_err(),
             "metadata chunk claiming records must be rejected"
+        );
+    }
+
+    /// A file truncated INSIDE a chunk header must surface as corruption,
+    /// not as a clean EOF: C++ marks the source truncated as soon as any
+    /// byte of a chunk was consumed (FailReading) and fails with
+    /// "Truncated Riegeli/records file" at close. Mapping the partial
+    /// header to EOF made an interrupted download indistinguishable from a
+    /// complete file — silent data loss.
+    #[test]
+    fn truncation_inside_chunk_header_is_an_error_not_eof() {
+        let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        assert_eq!(&two[..one.len()], &one[..]);
+
+        for kept in [1usize, 20, 39] {
+            let data = two[..one.len() + kept].to_vec();
+            let mut reader =
+                RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+            assert_eq!(
+                reader.read_record().expect("read ok").as_deref(),
+                Some(&b"a"[..]),
+                "kept={kept}"
+            );
+            let err = reader
+                .read_record()
+                .expect_err("a partial trailing chunk header is truncation, not EOF");
+            assert!(
+                err.to_string().to_lowercase().contains("truncated"),
+                "kept={kept}: unexpected error: {err}"
+            );
+        }
+
+        // Sanity: the file cut exactly at the chunk boundary is a clean EOF.
+        let data = two[..one.len()].to_vec();
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"a"[..])
+        );
+        assert_eq!(reader.read_record().expect("read ok"), None, "clean EOF");
+    }
+
+    /// Same for a partial 24-byte block header at a block boundary.
+    #[test]
+    fn truncation_inside_block_header_is_an_error_not_eof() {
+        let mut data = write_records(&[b"a"], WriterOptions::new().final_padding(BLOCK_SIZE));
+        assert_eq!(data.len() as u64, BLOCK_SIZE);
+        let second = write_records(&[b"b"], WriterOptions::new());
+        data.extend_from_slice(&second[..10]); // 10 of the 24 block-header bytes
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"a"[..])
+        );
+        let err = reader
+            .read_record()
+            .expect_err("a partial block header is truncation, not EOF");
+        assert!(
+            err.to_string().to_lowercase().contains("truncated"),
+            "unexpected error: {err}"
         );
     }
 
