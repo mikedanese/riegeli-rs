@@ -68,7 +68,7 @@ enum CallbackType {
     /// Read a varint32 length and then that many bytes from a data buffer,
     /// and prepend the tag + length-varint + data.
     StringField,
-    /// Existence-only: write tag + zero value, skip data buffer.
+    /// Existence-only: write tag + zero value; the data buffer is never read.
     /// The zero value depends on the wire type:
     /// - Varint: single 0x00 byte
     /// - Fixed32: 4 zero bytes
@@ -1641,9 +1641,10 @@ struct DecodeState<'a> {
 ///
 /// When projection-during-decode is active (include_map is Some), SelectCallback
 /// nodes are resolved via `resolve_select_callback` to determine the concrete
-/// callback. Excluded fields resolve to NoOp (with buffer data skipped),
-/// excluded submessages use SkippedSubmessageEnd/Start to track nesting depth
-/// without producing output.
+/// callback. Excluded fields resolve to NoOp and existence-only fields write a
+/// zeroed value; in both cases the field's data buffer is never read (C++
+/// kEmptyReader semantics). Excluded submessages use SkippedSubmessageEnd/Start
+/// to track nesting depth without producing output.
 fn execute_node_action(
     node: &StateMachineNode,
     current_node_idx: usize,
@@ -1684,12 +1685,10 @@ fn execute_node_action(
 
     match effective_callback {
         CallbackType::NoOp => {
-            // When a field is excluded by projection, it resolves to NoOp.
-            // If the node has a data buffer, we must consume (skip) the buffer
-            // bytes to keep the buffer cursor in sync, without writing output.
-            if let Some(buf_idx) = node.buffer_index {
-                skip_field_data(node, state.buffers, buf_idx, state.node_templates)?;
-            }
+            // No output and no buffer reads. When a field is excluded by
+            // projection it resolves to NoOp; C++ assigns such nodes an
+            // empty reader (kEmptyReader) and never consumes the field's
+            // data buffer bytes.
         }
         CallbackType::MessageStart => {
             if !state.submessage_stack.is_empty() {
@@ -1733,8 +1732,8 @@ fn execute_node_action(
             write_string_field(node, state.dest, state.buffers)?;
         }
         CallbackType::ExistenceOnly => {
-            // Write tag + zero value, skip data buffer bytes.
-            write_existence_only_field(node, state.dest, state.buffers, state.node_templates)?;
+            // Write tag + zero value; the data buffer is never read.
+            write_existence_only_field(node, state.dest, state.node_templates)?;
         }
         CallbackType::Failure => {
             return Err(RiegeliError::MalformedData(
@@ -1796,72 +1795,6 @@ fn execute_node_action(
             return Err(RiegeliError::MalformedData(
                 "unresolved SelectCallback in decode loop".into(),
             ));
-        }
-    }
-    Ok(())
-}
-
-/// Skip (consume) the data buffer bytes for an excluded field without writing
-/// any output. This keeps the buffer cursor in sync when a field is excluded
-/// by projection.
-///
-/// The skip logic must match what the corresponding write function would read:
-/// - Varint: skip `data_length` bytes (from tag_data_size - tag_length, or from template)
-/// - Fixed32: skip 4 bytes
-/// - Fixed64: skip 8 bytes
-/// - StringField: read varint32 length, skip that many bytes
-/// - CopyTag (inline varint): no data buffer bytes to skip
-///
-/// Uses the node's `NodeTemplate` to determine the original wire type and
-/// subtype, then skips the appropriate number of bytes:
-/// - Varint (non-inline): skip `subtype + 1` bytes
-/// - Inline varint: no buffer data to skip (data is in tag_data)
-/// - Fixed32: skip 4 bytes
-/// - Fixed64: skip 8 bytes
-/// - StringField: read varint32 length, skip that many bytes
-fn skip_field_data(
-    node: &StateMachineNode,
-    buffers: &mut [BufferCursor],
-    buf_idx: usize,
-    node_templates: &[NodeTemplate],
-) -> Result<(), RiegeliError> {
-    // Use the node template for tag and subtype when available.
-    let (tag, st) = if let Some(tmpl_idx) = node.node_template_index {
-        let tmpl = &node_templates[tmpl_idx];
-        (tmpl.tag, tmpl.subtype)
-    } else if !node.tag_data.is_empty() {
-        let (tag, _) = decode_u32(&node.tag_data).map_err(|e| {
-            RiegeliError::MalformedData(format!("decoding tag for skip: {e}").into())
-        })?;
-        (tag, 0u8)
-    } else {
-        return Ok(());
-    };
-
-    let wt = tag_wire_type(tag);
-    match wt {
-        Some(WireType::Varint) => {
-            if st >= subtype::VARINT_INLINE_0 {
-                // Inline varint — data is stored in tag_data, no buffer read.
-                return Ok(());
-            }
-            // Non-inline varint: data_length = subtype + 1.
-            let data_length = (st + 1) as usize;
-            buffers[buf_idx].read_exact(data_length)?;
-        }
-        Some(WireType::Fixed32) => {
-            buffers[buf_idx].read_exact(4)?;
-        }
-        Some(WireType::Fixed64) => {
-            buffers[buf_idx].read_exact(8)?;
-        }
-        Some(WireType::LengthDelimited) => {
-            // String field: read length varint, skip that many data bytes.
-            let str_len = buffers[buf_idx].read_varint32()? as usize;
-            buffers[buf_idx].read_exact(str_len)?;
-        }
-        _ => {
-            // StartGroup/EndGroup or unknown — no data to skip.
         }
     }
     Ok(())
@@ -2000,8 +1933,11 @@ fn write_string_field(
     Ok(())
 }
 
-/// Write an existence-only field: tag + zero value to the backward buffer,
-/// then skip (consume) the data buffer bytes without using them.
+/// Write an existence-only field: tag + zero value to the backward buffer.
+///
+/// The field's data buffer is not touched: C++ assigns existence-only nodes
+/// an empty reader (kEmptyReader) and the corresponding callbacks perform no
+/// buffer reads.
 ///
 /// The zero value depends on the wire type:
 /// - Varint: single 0x00 byte
@@ -2011,7 +1947,6 @@ fn write_string_field(
 fn write_existence_only_field(
     node: &StateMachineNode,
     dest: &mut BackwardBuffer,
-    buffers: &mut [BufferCursor],
     node_templates: &[NodeTemplate],
 ) -> Result<(), RiegeliError> {
     // Get the tag and subtype from the template.
@@ -2052,11 +1987,6 @@ fn write_existence_only_field(
     buf[..tag_only.len()].copy_from_slice(tag_only);
     buf[tag_only.len()..total].copy_from_slice(zero_value);
     dest.write(&buf[..total])?;
-
-    // Skip the data buffer bytes.
-    if let Some(buf_idx) = node.buffer_index {
-        skip_field_data(node, buffers, buf_idx, node_templates)?;
-    }
     Ok(())
 }
 
@@ -3894,6 +3824,36 @@ mod tests {
             resolve_select_callback(&select_node, &node_templates, &include_map, &[], &[], 0)
                 .unwrap();
         assert_eq!(result2, CallbackType::SubmessageStart);
+    }
+
+    // -------------------------------------------------------------------
+    // Excluded / existence-only fields never read their data buffer
+    // (C++ SetCallbackType assigns kEmptyReader for kNo / kExistenceOnly)
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_existence_only_field_buffer_never_read() {
+        // The C++ reference never touches the data buffer of a field
+        // resolved as existence-only: the buffer is replaced by an empty
+        // reader and the callback (CopyTag with a zeroed value byte) does no
+        // reads. A truncated or garbage buffer therefore decodes fine.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]).existence_only());
+
+        let num_states = 2u32;
+        let states = vec![
+            // State 0: String field 1, implicit to state 1.
+            TestState::new(0x0A, num_states + 1, 0, 0),
+            // State 1: MessageStart.
+            TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0),
+        ];
+
+        // Truncated string buffer: claims 5 payload bytes, has none.
+        let buf0 = vec![0x05];
+        let chunk = build_transpose_chunk(CompressionType::None, 1, 7, &states, &[buf0], &[], 0);
+
+        let mut dec = TransposeChunkDecoder::new_with_projection(chunk, Some(&proj))
+            .expect("existence-only fields must not read their buffer");
+        // Existence-only string: tag + zero length.
+        assert_eq!(dec.read_record().unwrap().unwrap(), vec![0x0A, 0x00]);
     }
 
     // -------------------------------------------------------------------
