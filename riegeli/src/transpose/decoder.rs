@@ -1356,7 +1356,14 @@ impl TransposeChunkDecoder {
     fn callback_for_wire_type(wt: Option<WireType>, st: u8) -> Result<CallbackType, RiegeliError> {
         match wt {
             Some(WireType::Varint) => {
-                if st >= subtype::VARINT_INLINE_0 {
+                // C++ GetVarintCallbackType rejects subtypes above
+                // kVarintInlineMax (137); larger values would encode an inline
+                // varint byte with the continuation bit set.
+                if st > subtype::VARINT_INLINE_MAX {
+                    Err(RiegeliError::MalformedData(
+                        format!("invalid varint subtype {st}").into(),
+                    ))
+                } else if st >= subtype::VARINT_INLINE_0 {
                     Ok(CallbackType::CopyTag)
                 } else {
                     Ok(CallbackType::Varint {
@@ -2800,6 +2807,48 @@ mod tests {
         let mut dec = TransposeChunkDecoder::new(chunk).expect("new ok");
         let rec = dec.read_record().unwrap().expect("record");
         assert_eq!(rec, expected, "inline varint mismatch");
+    }
+
+    // -------------------------------------------------------------------
+    // Varint subtype upper bound (C++ kVarintInlineMax)
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_varint_subtype_above_inline_max_rejected() {
+        // C++ GetVarintCallbackType returns kUnknown for subtypes above
+        // kVarintInlineMax (137), which fails the chunk with "Invalid node".
+        // Accepting such a subtype would emit an inline value byte with the
+        // continuation bit set, i.e. a malformed varint, into the record.
+        for st in [
+            subtype::VARINT_INLINE_MAX + 1,
+            subtype::VARINT_INLINE_MAX + 2,
+            0xFF,
+        ] {
+            let num_states = 2u32;
+            let states = vec![
+                TestState::new(0x08, num_states + 1, st, 0),
+                TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0),
+            ];
+            let chunk = build_transpose_chunk(CompressionType::None, 1, 2, &states, &[], &[], 0);
+            let result = TransposeChunkDecoder::new(chunk);
+            assert!(
+                result.is_err(),
+                "varint subtype {st} must be rejected (C++ rejects > 137)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_varint_subtype_inline_max_accepted() {
+        // Subtype 137 (inline value 127) is the largest valid inline varint.
+        let num_states = 2u32;
+        let states = vec![
+            TestState::new(0x08, num_states + 1, subtype::VARINT_INLINE_MAX, 0),
+            TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0),
+        ];
+        let chunk = build_transpose_chunk(CompressionType::None, 1, 2, &states, &[], &[], 0);
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("subtype 137 is valid");
+        let rec = dec.read_record().unwrap().expect("record");
+        assert_eq!(rec, vec![0x08, 0x7F]);
     }
 
     // -------------------------------------------------------------------
