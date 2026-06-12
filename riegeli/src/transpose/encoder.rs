@@ -355,12 +355,14 @@ impl TransposeChunkEncoder {
 
     /// Set the maximum uncompressed byte size per bucket.
     ///
-    /// When set to a value smaller than `u64::MAX`, buffers are split across
-    /// multiple independently compressed buckets using a greedy algorithm.
-    /// Smaller buckets enable field projection (skipping decompression of
-    /// unneeded data) at the cost of slightly worse compression.
+    /// When set to a value smaller than `u64::MAX`, buffers within each
+    /// buffer-type group are split across multiple independently compressed
+    /// buckets (buckets never span groups). Smaller buckets enable field
+    /// projection (skipping decompression of unneeded data) at the cost of
+    /// slightly worse compression.
     ///
-    /// The default is `u64::MAX` (single bucket).
+    /// The default is `u64::MAX` (one bucket per non-empty buffer-type
+    /// group, plus one for the non-proto lengths buffer).
     pub fn bucket_size(mut self, size: u64) -> Self {
         self.bucket_size = size;
         self
@@ -412,7 +414,8 @@ impl TransposeChunkEncoder {
             return self.encode_empty();
         }
 
-        let (all_buffers, buffer_sizes, buffer_pos) = self.collect_and_sort_buffers();
+        let (all_buffers, buffer_sizes, buffer_pos, buffer_groups) =
+            self.collect_and_sort_buffers();
 
         // Build the optimized state machine.
         let state_machine = self.create_state_machine();
@@ -422,7 +425,7 @@ impl TransposeChunkEncoder {
         self.ensure_last_state_explicit();
 
         // Split buffers into buckets and compress each independently.
-        let compressed_buckets = self.create_compressed_buckets(&all_buffers)?;
+        let compressed_buckets = self.create_compressed_buckets(&all_buffers, &buffer_groups)?;
 
         let header = self.build_header(
             &compressed_buckets,
@@ -435,12 +438,28 @@ impl TransposeChunkEncoder {
 
     /// Collect all data buffers, sort them by type then by (size, parent, tag),
     /// and build the buffer-position lookup map.
-    fn collect_and_sort_buffers(&mut self) -> (Vec<Vec<u8>>, Vec<u64>, BTreeMap<NodeId, u32>) {
+    ///
+    /// Also returns the ranges of `all_buffers` indices forming each
+    /// non-empty buffer group: one range per non-empty [`BufferType`], plus a
+    /// final single-buffer range for `nonproto_lengths` if present. Bucket
+    /// splitting operates within each group independently (buckets never
+    /// span groups, matching the C++ `WriteBuffers`).
+    #[allow(clippy::type_complexity)]
+    fn collect_and_sort_buffers(
+        &mut self,
+    ) -> (
+        Vec<Vec<u8>>,
+        Vec<u64>,
+        BTreeMap<NodeId, u32>,
+        Vec<std::ops::Range<usize>>,
+    ) {
         let mut buffer_pos: BTreeMap<NodeId, u32> = BTreeMap::new();
         let mut all_buffers: Vec<Vec<u8>> = Vec::new();
         let mut buffer_sizes: Vec<u64> = Vec::new();
+        let mut buffer_groups: Vec<std::ops::Range<usize>> = Vec::new();
 
         for &buf_type in &ALL_BUFFER_TYPES {
+            let group_start = all_buffers.len();
             let buffers = self.data.get_mut(buf_type);
             buffers.sort_by(|a, b| {
                 let size_cmp = a.data.len().cmp(&b.data.len());
@@ -464,72 +483,105 @@ impl TransposeChunkEncoder {
                 buf.data.write_to(&mut reversed);
                 all_buffers.push(reversed);
             }
+            if all_buffers.len() > group_start {
+                buffer_groups.push(group_start..all_buffers.len());
+            }
         }
 
-        // nonproto_lengths is the last buffer if non-empty.
+        // nonproto_lengths is the last buffer if non-empty. It always forms
+        // its own bucket (the C++ reference passes a fresh
+        // new_uncompressed_bucket_size for it).
         if !self.nonproto_lengths.is_empty() {
+            let group_start = all_buffers.len();
             buffer_sizes.push(self.nonproto_lengths.len() as u64);
             let mut reversed = Vec::new();
             self.nonproto_lengths.write_to(&mut reversed);
             all_buffers.push(reversed);
+            buffer_groups.push(group_start..all_buffers.len());
         }
 
-        (all_buffers, buffer_sizes, buffer_pos)
+        (all_buffers, buffer_sizes, buffer_pos, buffer_groups)
     }
 
-    /// Split all buffers into independently compressed buckets using the
-    /// greedy algorithm: accumulate buffer sizes within each BufferType group
-    /// (sorted by size descending for splitting), and start a new bucket when
-    /// `current_bucket_size + next_buffer_size / 2 >= bucket_size`.
+    /// Split all buffers into independently compressed buckets, matching the
+    /// C++ `WriteBuffers` algorithm:
+    ///
+    /// - Buckets never span buffer groups (one group per non-empty
+    ///   [`BufferType`], plus `nonproto_lengths` as its own group), so even
+    ///   with `bucket_size == u64::MAX` each non-empty group gets at least
+    ///   one bucket of its own.
+    /// - Within a group, bucket boundaries are planned scanning the buffers
+    ///   in reverse (largest first, since buffers are sorted ascending by
+    ///   size): start a new bucket when
+    ///   `current_bucket_size + buffer_size / 2 >= bucket_size`, and once
+    ///   `remaining_buffers_size <= bucket_size / 2` fold the entire
+    ///   remainder into the current bucket.
+    /// - The planned sizes are then consumed back-to-front while filling
+    ///   buckets in forward buffer order.
     ///
     /// Returns the compressed data for each bucket.
     fn create_compressed_buckets(
         &self,
         all_buffers: &[Vec<u8>],
+        buffer_groups: &[std::ops::Range<usize>],
     ) -> Result<Vec<Vec<u8>>, RiegeliError> {
-        if all_buffers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        if self.bucket_size == u64::MAX {
-            // Single bucket: concatenate all buffers.
-            let mut bucket_data: Vec<u8> = Vec::new();
-            for buf in all_buffers {
-                bucket_data.extend_from_slice(buf);
-            }
-            let compressed =
-                compress_with_prefix(&bucket_data, self.compression, self.compress_opts)?;
-            return Ok(vec![compressed]);
-        }
-
-        // Multi-bucket: greedy splitting.
         let mut compressed_buckets: Vec<Vec<u8>> = Vec::new();
-        let mut current_bucket: Vec<u8> = Vec::new();
-        let mut current_size: u64 = 0;
 
-        for buf in all_buffers {
-            let buf_size = buf.len() as u64;
-            if !current_bucket.is_empty() && current_size + buf_size / 2 >= self.bucket_size {
-                // Start a new bucket.
-                compressed_buckets.push(compress_with_prefix(
-                    &current_bucket,
-                    self.compression,
-                    self.compress_opts,
-                )?);
-                current_bucket = Vec::new();
-                current_size = 0;
+        for group in buffer_groups {
+            let buffers = &all_buffers[group.clone()];
+
+            // Plan bucket sizes scanning in reverse (largest buffer first).
+            let mut remaining_buffers_size: u64 = buffers.iter().map(|b| b.len() as u64).sum();
+            let mut uncompressed_bucket_sizes: Vec<u64> = Vec::new();
+            let mut current_bucket_size: u64 = 0;
+            for buf in buffers.iter().rev() {
+                let current_buffer_size = buf.len() as u64;
+                if current_bucket_size > 0
+                    && current_bucket_size + current_buffer_size / 2 >= self.bucket_size
+                {
+                    uncompressed_bucket_sizes.push(current_bucket_size);
+                    current_bucket_size = 0;
+                }
+                current_bucket_size += current_buffer_size;
+                remaining_buffers_size -= current_buffer_size;
+                if remaining_buffers_size <= self.bucket_size / 2 {
+                    current_bucket_size += remaining_buffers_size;
+                    break;
+                }
             }
-            current_bucket.extend_from_slice(buf);
-            current_size += buf_size;
-        }
+            if current_bucket_size > 0 {
+                uncompressed_bucket_sizes.push(current_bucket_size);
+            }
 
-        // Flush remaining.
-        if !current_bucket.is_empty() {
-            compressed_buckets.push(compress_with_prefix(
-                &current_bucket,
-                self.compression,
-                self.compress_opts,
-            )?);
+            // Fill buckets in forward order, popping planned sizes from the
+            // back (the most recently planned size covers the smallest
+            // buffers, which come first).
+            let mut current_bucket: Vec<u8> = Vec::new();
+            let mut bucket_remaining: u64 = 0;
+            for buf in buffers {
+                if bucket_remaining == 0 {
+                    bucket_remaining = uncompressed_bucket_sizes.pop().ok_or_else(|| {
+                        RiegeliError::MalformedData(
+                            "internal: bucket sizes and buffer sizes do not match".into(),
+                        )
+                    })?;
+                }
+                if (buf.len() as u64) > bucket_remaining {
+                    return Err(RiegeliError::MalformedData(
+                        "internal: bucket sizes and buffer sizes do not match".into(),
+                    ));
+                }
+                bucket_remaining -= buf.len() as u64;
+                current_bucket.extend_from_slice(buf);
+                if bucket_remaining == 0 {
+                    compressed_buckets.push(compress_with_prefix(
+                        &current_bucket,
+                        self.compression,
+                        self.compress_opts,
+                    )?);
+                    current_bucket.clear();
+                }
+            }
         }
 
         Ok(compressed_buckets)
@@ -1678,6 +1730,100 @@ mod tests {
         assert_eq!(&out[..3], &[1, 2, 3]);
         assert_eq!(out[3], 0xAB);
         assert_eq!(out[out.len() - 1], 0xAB);
+    }
+
+    // -------------------------------------------------------------------
+    // Bucket layout must match the C++ reference (WriteBuffers).
+    // -------------------------------------------------------------------
+
+    /// Parse `(num_buckets, bucket_sizes)` from an uncompressed transposed
+    /// chunk. With `CompressionType::None` the compressed bucket sizes in the
+    /// header equal the uncompressed bucket sizes.
+    fn parse_bucket_info(chunk: &Chunk) -> (u32, Vec<u64>) {
+        let data = &chunk.data;
+        assert_eq!(data[0], CompressionType::None as u8);
+        let mut pos = 1usize;
+        let (hdr_len, n) = decode_u64(&data[pos..]).unwrap();
+        pos += n;
+        let header = &data[pos..pos + hdr_len as usize];
+        let mut hpos = 0usize;
+        let (num_buckets, n) = decode_u32(&header[hpos..]).unwrap();
+        hpos += n;
+        let (_num_buffers, n) = decode_u32(&header[hpos..]).unwrap();
+        hpos += n;
+        let mut sizes = Vec::new();
+        for _ in 0..num_buckets {
+            let (s, n) = decode_u64(&header[hpos..]).unwrap();
+            hpos += n;
+            sizes.push(s);
+        }
+        (num_buckets, sizes)
+    }
+
+    #[test]
+    fn test_buckets_never_span_buffer_type_groups() {
+        // The C++ reference plans buckets per BufferType group and always
+        // starts a new bucket at each group boundary; nonproto_lengths always
+        // gets its own bucket. Even with the maximum bucket size this yields
+        // one bucket per non-empty group.
+        //
+        // Proto record with one buffered field of each type:
+        //   field 1 varint 300:  08 AC 02   -> Varint buffer, 2 stripped bytes
+        //   field 2 fixed32:     15 + 4B    -> Fixed32 buffer, 4 bytes
+        //   field 3 fixed64:     19 + 8B    -> Fixed64 buffer, 8 bytes
+        //   field 4 string "abc" 22 03 ...  -> String buffer, 4 bytes
+        let proto_rec: Vec<u8> = vec![
+            0x08, 0xAC, 0x02, 0x15, 0x01, 0x02, 0x03, 0x04, 0x19, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07, 0x08, 0x22, 0x03, 0x61, 0x62, 0x63,
+        ];
+        // Non-proto record (wire type 7): NonProto buffer 2 bytes,
+        // nonproto_lengths buffer 1 byte (varint length 2).
+        let nonproto_rec: Vec<u8> = vec![0xFF, 0x01];
+
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None);
+        enc.add_record(&proto_rec).unwrap();
+        enc.add_record(&nonproto_rec).unwrap();
+        let chunk = enc.encode().unwrap();
+
+        let (num_buckets, sizes) = parse_bucket_info(&chunk);
+        assert_eq!(
+            num_buckets, 6,
+            "expected one bucket per non-empty BufferType group plus nonproto_lengths"
+        );
+        assert_eq!(sizes, vec![2, 4, 8, 4, 2, 1]);
+
+        // The multi-bucket chunk must still round-trip.
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("decoder");
+        let mut out = Vec::new();
+        while let Some(rec) = dec.read_record().expect("read_record") {
+            out.push(rec);
+        }
+        assert_eq!(out, vec![proto_rec, nonproto_rec]);
+    }
+
+    #[test]
+    fn test_bucket_split_reverse_planning_with_tail_merge() {
+        // The C++ reference plans bucket boundaries scanning each group's
+        // buffers in reverse (largest first) and folds the remaining buffers
+        // into the current bucket once `remaining <= bucket_size / 2`.
+        //
+        // String buffers of sizes [2, 9] with bucket_size 6:
+        //   reverse planning: take 9 (current = 9), remaining = 2 <= 3
+        //   -> tail-merge -> ONE bucket of 11 bytes.
+        // A forward greedy split would produce two buckets [2] and [9].
+        let record: Vec<u8> = vec![
+            0x0A, 0x01, 0x61, // field 1 string "a"   -> String buffer, 2 bytes
+            0x12, 0x08, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+            0x68, // field 2 string, 8 bytes -> String buffer, 9 bytes
+        ];
+
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None).bucket_size(6);
+        enc.add_record(&record).unwrap();
+        let chunk = enc.encode().unwrap();
+
+        let (num_buckets, sizes) = parse_bucket_info(&chunk);
+        assert_eq!(num_buckets, 1, "tail-merge must fold the remainder");
+        assert_eq!(sizes, vec![11]);
     }
 
     // -------------------------------------------------------------------
