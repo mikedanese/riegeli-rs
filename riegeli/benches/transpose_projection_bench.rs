@@ -10,6 +10,13 @@
 
 use std::io::Cursor;
 
+// Under `cargo codspeed build` (--cfg codspeed) the benchmarks are compiled
+// against the CodSpeed compatibility layer instead of criterion proper.
+#[cfg(codspeed)]
+use codspeed_criterion_compat::{
+    criterion_group, criterion_main, Criterion, SamplingMode, Throughput,
+};
+#[cfg(not(codspeed))]
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 
 use riegeli::{
