@@ -176,3 +176,64 @@ fn compression_type_try_from_unknown_returns_err() {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// Alignment targets that land inside a block-header shadow must be advanced
+// to the next multiple that is a possible chunk boundary, matching the C++
+// records_internal::PosAfterPadding behavior.
+// -----------------------------------------------------------------------
+
+#[test]
+fn final_padding_target_inside_block_header_shadow() {
+    // With no records the writer is at position 64. The first multiple of
+    // 65546 is 65546 = 65536 + 10, which falls inside the 24-byte block header
+    // at offset 65536 and cannot be a chunk boundary. The next multiples,
+    // 131092 (block offset 20) and only then 196638 (block offset 30), must be
+    // tried in turn; the file must end at 196638.
+    let alignment = 65_546u64;
+    let data = write_records(&[], WriterOptions::new().final_padding(alignment));
+    assert_eq!(
+        data.len() as u64 % alignment,
+        0,
+        "file size {} is not a multiple of {alignment}",
+        data.len()
+    );
+    assert_eq!(data.len() as u64, 3 * alignment);
+    // The file must still parse cleanly.
+    assert!(read_all(data).is_empty());
+}
+
+#[test]
+fn initial_padding_target_inside_block_header_shadow() {
+    let alignment = 65_546u64;
+    let record = vec![0x5Au8; 100];
+    let data = write_records(
+        &[record.as_slice()],
+        WriterOptions::new().initial_padding(alignment),
+    );
+    assert_eq!(
+        data.len() as u64 % alignment,
+        0,
+        "file size {} is not a multiple of {alignment}",
+        data.len()
+    );
+    let got = read_all(data);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0], record);
+}
+
+#[test]
+fn final_padding_shadow_alignment_matches_cpp_writer() {
+    // Differential check against the reference implementation: identical
+    // options must produce a byte-identical file (signature chunk followed by
+    // one zero-filled padding chunk ending at 196638).
+    let alignment = 65_546u64;
+    let rust_bytes = write_records(&[], WriterOptions::new().final_padding(alignment));
+    let cpp_bytes = {
+        let opts = riegeli_ffi::WriterOptions::new().final_padding(alignment);
+        let w = riegeli_ffi::RecordWriter::new(opts).expect("cpp writer");
+        w.close().expect("cpp close")
+    };
+    assert_eq!(rust_bytes.len(), cpp_bytes.len(), "file sizes differ");
+    assert_eq!(rust_bytes, cpp_bytes, "file bytes differ");
+}

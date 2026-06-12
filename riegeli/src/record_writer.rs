@@ -16,7 +16,6 @@
 
 use std::io::Write;
 
-use crate::block_arithmetic::add_with_overhead;
 use crate::block_header::BlockHeader;
 use crate::chunk_header::ChunkHeader;
 use crate::chunk_header::ChunkType;
@@ -411,17 +410,19 @@ impl<W: Write> RecordWriter<W> {
     ///
     /// The padding chunk has `ChunkType::Padding` and enough data bytes that the
     /// total file size lands on an alignment boundary.
+    ///
+    /// Mirrors the C++ reference (`records_internal::PosAfterPadding` followed by
+    /// `DefaultChunkWriterBase::WritePadding`): the padded end position is the
+    /// smallest multiple of `alignment` that leaves room for the 40-byte chunk
+    /// header and is a possible chunk boundary (chunks cannot end at positions
+    /// whose block offset is 1..=24, i.e. inside the shadow of a block header).
     fn write_padding_to_multiple(&mut self, alignment: u64) -> Result<(), RiegeliError> {
-        // We need: file_pos + padding_chunk_size ≡ 0 (mod alignment).
-        // A padding chunk costs: CHUNK_HEADER_SIZE (40) + data_size bytes in logical space,
-        // but block headers are interleaved. We target a file_pos that is a multiple of
-        // alignment, where the padding chunk fills the gap.
-        //
-        // Strategy: compute the minimum data_size such that after writing the
-        // padding chunk the file_pos lands on a multiple of alignment. If
-        // already aligned, no chunk is written at all (early return below) —
+        // If already aligned, no chunk is written at all (early return below) —
         // repeated padding calls on a settled file are free, which is what
         // makes flush-then-close add no redundant chunks.
+        if alignment <= 1 {
+            return Ok(());
+        }
 
         let current = self.file_pos;
 
@@ -430,35 +431,32 @@ impl<W: Write> RecordWriter<W> {
             return Ok(());
         }
 
-        // Target: next multiple of alignment at or after (current + CHUNK_HEADER_SIZE).
-        // Because we need at minimum CHUNK_HEADER_SIZE bytes for the padding chunk header.
-        // Actually: the padding chunk header itself takes CHUNK_HEADER_SIZE bytes of file
-        // space (with possible interleaved block headers). We need to figure out what
-        // data_size makes the chunk end at a multiple of alignment.
-        //
-        // We iterate: find target = ceil(current / alignment) * alignment.
-        // Then data_size = target - add_with_overhead(current, CHUNK_HEADER_SIZE).
-        // But if that's negative, we go to the next alignment boundary.
+        // Distance to the next multiple of `alignment`.
+        let mut length = alignment - current % alignment;
 
-        // The end of the padding chunk = add_with_overhead(current,
-        // CHUNK_HEADER_SIZE + data_size); we want that to equal `target`.
-        let header_logical = crate::block_arithmetic::distance_without_overhead(
-            current,
-            add_with_overhead(current, CHUNK_HEADER_SIZE),
-        );
-
-        // Advance to the nearest boundary that can fit the 40-byte chunk
-        // header. Small alignments may need several steps — a single step
-        // (with a saturating fallback) used to yield a zero data size and
-        // overshoot the boundary, emitting padding that did not land on a
-        // multiple of the alignment at all.
-        let mut target = ((current / alignment) + 1) * alignment;
-        let mut logical_end = crate::block_arithmetic::distance_without_overhead(current, target);
-        while logical_end < header_logical {
-            target += alignment;
-            logical_end = crate::block_arithmetic::distance_without_overhead(current, target);
+        // Not enough space for the chunk header: go to the next multiple.
+        // Small alignments may need several steps — a single step (with a
+        // saturating fallback) used to yield a zero data size and overshoot
+        // the boundary, emitting padding that did not land on a multiple of
+        // the alignment at all.
+        while length < CHUNK_HEADER_SIZE {
+            length += alignment;
         }
-        let data_size = logical_end - header_logical;
+
+        let mut end_pos = current + length;
+
+        // The padding chunk must end at a possible chunk boundary. Positions at
+        // block offset 1..=24 are inside / immediately after a block header (the
+        // C++ `IsPossibleChunkBoundary`: `RemainingInBlock(pos) < kUsableBlockSize`,
+        // which admits offset 0 and offsets >= 25).
+        while crate::block_arithmetic::remaining_in_block(end_pos) >= BLOCK_SIZE - BLOCK_HEADER_SIZE
+        {
+            end_pos += alignment;
+        }
+
+        // Padding data excludes the chunk header and any intervening block headers.
+        let data_size = crate::block_arithmetic::distance_without_overhead(current, end_pos)
+            - CHUNK_HEADER_SIZE;
 
         // Build the padding data (all zeros).
         let padding_data = vec![0u8; data_size as usize];
