@@ -202,7 +202,8 @@ impl RecordReader {
     /// Advance to the next record. Returns `false` at end of file.
     /// After a successful call, use [`last_record`](Self::last_record) to
     /// borrow the record data without copying. The borrow is valid until the
-    /// next call to `read_next` or `close`.
+    /// next operation that mutates the reader (`read_next`, `seek_numeric`,
+    /// `read_serialized_metadata`, or `close`).
     pub fn read_next(&mut self) -> Result<bool, String> {
         if ffi::reader_read_next(self.inner.pin_mut()) {
             Ok(true)
@@ -215,6 +216,8 @@ impl RecordReader {
 
     /// Borrow the record returned by the last successful [`read_next`](Self::read_next) call.
     /// The slice borrows directly from the C++ reader's internal buffers (zero-copy).
+    /// Returns an empty slice if the reader has been mutated since the last
+    /// successful `read_next` (any mutation invalidates the borrowed view).
     pub fn last_record(&self) -> &[u8] {
         let ptr = unsafe { ffi::reader_last_record_ptr(&self.inner) };
         let len = ffi::reader_last_record_len(&self.inner);
@@ -363,6 +366,50 @@ mod tests {
         // Records still readable after metadata read
         assert_eq!(reader.read_record().unwrap().unwrap(), b"record");
         reader.close().unwrap();
+    }
+
+    #[test]
+    fn last_record_invalidated_by_seek() {
+        let mut writer = RecordWriter::new(WriterOptions::new()).unwrap();
+        writer.write_record(b"hello").unwrap();
+        writer.write_record(b"world").unwrap();
+        let data = writer.close().unwrap();
+
+        let mut reader = RecordReader::new(&data).unwrap();
+        assert!(reader.read_next().unwrap());
+        assert_eq!(reader.last_record(), b"hello");
+
+        // Seek repositions the C++ reader, which invalidates the buffer the
+        // last ReadRecord string_view pointed into. last_record must return
+        // an empty slice, not a view over freed memory.
+        assert!(reader.seek_numeric(0));
+        assert!(reader.last_record().is_empty());
+
+        // The reader still works after the seek.
+        assert!(reader.read_next().unwrap());
+        assert_eq!(reader.last_record(), b"hello");
+        reader.close().unwrap();
+    }
+
+    #[test]
+    fn last_record_invalidated_by_metadata_read() {
+        let metadata = b"metadata bytes";
+        let opts = WriterOptions::new().serialized_metadata(metadata);
+        let mut writer = RecordWriter::new(opts).unwrap();
+        writer.write_record(b"record").unwrap();
+        let data = writer.close().unwrap();
+
+        let mut reader = RecordReader::new(&data).unwrap();
+        assert!(reader.read_next().unwrap());
+        assert_eq!(reader.last_record(), b"record");
+
+        // ReadSerializedMetadata is a non-const operation on the C++ reader;
+        // it invalidates the previously returned record view. Mid-file it is
+        // a failed precondition in C++ (reader enters the failed state), but
+        // it must never leave a dangling record view behind.
+        assert!(reader.read_serialized_metadata().is_err());
+        assert!(reader.last_record().is_empty());
+        assert!(reader.close().is_err());
     }
 
     #[test]
