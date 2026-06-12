@@ -222,3 +222,31 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StreamError;
+    use crate::error::RiegeliError;
+
+    /// StreamError's Display includes the record index and the inner error,
+    /// and Error::source exposes the inner RiegeliError.
+    #[test]
+    fn stream_error_display_and_source() {
+        use std::error::Error;
+
+        let err = StreamError {
+            record_index: 7,
+            source: RiegeliError::MalformedData("inner error".into()),
+        };
+
+        // Display includes record index
+        let display = format!("{err}");
+        assert!(display.contains("record index 7"));
+        assert!(display.contains("inner error"));
+
+        // Error::source returns the inner RiegeliError
+        let source = err.source().unwrap();
+        let source_display = format!("{source}");
+        assert!(source_display.contains("inner error"));
+    }
+}

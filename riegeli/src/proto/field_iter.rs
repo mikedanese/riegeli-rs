@@ -293,3 +293,285 @@ pub fn copy_fields(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- field number boundaries ----
+
+    #[test]
+    fn field_number_max_29bit_parsed() {
+        // Max proto field number is 2^29 - 1 = 536870911 (0x1FFFFFFF), which
+        // requires a 5-byte tag varint.
+        let field_num: u32 = 0x1FFFFFFF;
+        let mut data = Vec::new();
+        encode_tag(&mut data, field_num, WireType::Varint);
+        encode_varint64(&mut data, 42);
+
+        let fields: Vec<_> = ProtoFieldIter::new(&data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_number, field_num);
+        assert_eq!(fields[0].value, FieldValue::Varint(42));
+    }
+
+    #[test]
+    fn field_number_zero_rejected() {
+        // Field number 0 is invalid; the iterator must yield an error.
+        let data = [0x00];
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    // ---- varint boundary values ----
+
+    #[test]
+    fn varint_u64_max_parsed() {
+        // The 10-byte varint maximum must decode to the exact value.
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::Varint);
+        encode_varint64(&mut data, u64::MAX);
+
+        let fields: Vec<_> = ProtoFieldIter::new(&data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields[0].value, FieldValue::Varint(u64::MAX));
+    }
+
+    #[test]
+    fn varint_length_boundaries_round_trip() {
+        // Values at every varint encoding-length transition must parse to the
+        // correct value and re-serialize byte-identically.
+        let boundary_values: &[u64] = &[
+            127,       // max 1-byte
+            128,       // min 2-byte
+            16383,     // max 2-byte
+            16384,     // min 3-byte
+            2097151,   // max 3-byte
+            2097152,   // min 4-byte
+            268435455, // max 4-byte
+            268435456, // min 5-byte
+        ];
+
+        for &val in boundary_values {
+            let mut data = Vec::new();
+            encode_tag(&mut data, 1, WireType::Varint);
+            encode_varint64(&mut data, val);
+
+            let fields: Vec<_> = ProtoFieldIter::new(&data)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                fields[0].value,
+                FieldValue::Varint(val),
+                "boundary value {} failed",
+                val
+            );
+
+            let mut reserialized = Vec::new();
+            serialize_field(&mut reserialized, &fields[0]);
+            assert_eq!(
+                data, reserialized,
+                "round-trip failed for boundary value {}",
+                val
+            );
+        }
+    }
+
+    // ---- non-canonical varints rejected ----
+
+    #[test]
+    fn overlong_varint_tag_rejected() {
+        // Tag encoded as [0x80, 0x00] is an overlong encoding of 0; the
+        // iterator must yield exactly one error.
+        let data = [0x80, 0x00];
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    #[test]
+    fn varint_11_bytes_rejected() {
+        // A varint value longer than 10 bytes is always invalid.
+        let mut data = vec![0x08]; // field 1, varint
+        data.extend_from_slice(&[0xFF; 10]); // 10 continuation bytes, no terminator
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    #[test]
+    fn noncanonical_ten_byte_varint_rejected() {
+        // A 10-byte varint whose final byte is 0x00 is non-canonical and must
+        // surface as an error from the iterator.
+        let mut data = vec![0x08]; // tag: field 1, varint
+        data.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].is_err(),
+            "10-byte varint with trailing 0x00 should be rejected as non-canonical"
+        );
+    }
+
+    #[test]
+    fn tag_varint32_overflow_rejected() {
+        // A 5-byte tag varint whose 5th byte carries bits beyond u32 range
+        // must be rejected.
+        let data = [0x80, 0x80, 0x80, 0x80, 0x10];
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].is_err(),
+            "varint32 overflow on 5th byte should error"
+        );
+    }
+
+    // ---- fixed types truncated exactly one byte short ----
+
+    #[test]
+    fn fixed32_truncated_by_one_rejected() {
+        // 3 of 4 data bytes present: exactly one byte short of the fixed32
+        // bounds check.
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::Fixed32);
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // only 3 bytes
+
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    #[test]
+    fn fixed64_truncated_by_one_rejected() {
+        // 7 of 8 data bytes present: exactly one byte short of the fixed64
+        // bounds check.
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::Fixed64);
+        data.extend_from_slice(&[0xFF; 7]); // only 7 bytes
+
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    // ---- length-delimited edge cases ----
+
+    #[test]
+    fn truncated_length_prefix_rejected() {
+        // The length-prefix varint itself is truncated (continuation bit set
+        // with no following byte).
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::LengthDelimited);
+        data.push(0x80); // continuation bit set, no next byte
+
+        let results: Vec<_> = ProtoFieldIter::new(&data).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
+    #[test]
+    fn length_delimited_multibyte_length_round_trip() {
+        // A 300-byte payload forces a 2-byte length-prefix varint through
+        // serialize_field's length encoding path.
+        let payload = vec![0xABu8; 300];
+        let mut original = Vec::new();
+        encode_tag(&mut original, 1, WireType::LengthDelimited);
+        encode_varint32(&mut original, 300);
+        original.extend_from_slice(&payload);
+
+        let fields: Vec<_> = ProtoFieldIter::new(&original)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        match &fields[0].value {
+            FieldValue::LengthDelimited(data) => assert_eq!(data.len(), 300),
+            _ => panic!("expected LengthDelimited"),
+        }
+
+        let mut reserialized = Vec::new();
+        for f in &fields {
+            serialize_field(&mut reserialized, f);
+        }
+        assert_eq!(original, reserialized);
+    }
+
+    // ---- groups ----
+
+    #[test]
+    fn end_group_without_start_yielded_flat() {
+        // The iterator does not validate group balance: an EndGroup with no
+        // matching StartGroup is yielded as a flat event (unlike
+        // is_proto_message, which rejects this input).
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::EndGroup);
+
+        let fields: Vec<_> = ProtoFieldIter::new(&data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].wire_type, WireType::EndGroup);
+        assert_eq!(fields[0].field_number, 1);
+    }
+
+    // ---- repeated fields ----
+
+    #[test]
+    fn repeated_field_number_all_yielded() {
+        // Repeated occurrences of the same field number are all yielded; the
+        // iterator performs no deduplication.
+        let mut data = Vec::new();
+        for _ in 0..5 {
+            encode_tag(&mut data, 1, WireType::Varint);
+            encode_varint64(&mut data, 42);
+        }
+
+        let fields: Vec<_> = ProtoFieldIter::new(&data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 5);
+        for f in &fields {
+            assert_eq!(f.field_number, 1);
+            assert_eq!(f.value, FieldValue::Varint(42));
+        }
+    }
+
+    // ---- no panic on arbitrary input ----
+
+    #[test]
+    fn no_panic_on_all_single_byte_inputs() {
+        for b in 0u8..=255 {
+            let _: Vec<_> = ProtoFieldIter::new(&[b]).collect();
+        }
+    }
+
+    #[test]
+    fn no_panic_on_two_byte_inputs() {
+        for hi in 0u8..=255 {
+            for lo in (0u8..=255).step_by(17) {
+                let _: Vec<_> = ProtoFieldIter::new(&[hi, lo]).collect();
+            }
+        }
+    }
+
+    // ---- derived trait impls ----
+
+    #[test]
+    fn proto_field_clone_eq_debug() {
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::Varint);
+        encode_varint64(&mut data, 42);
+
+        let fields: Vec<_> = ProtoFieldIter::new(&data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let cloned = fields[0].clone();
+        assert_eq!(fields[0], cloned);
+        let _ = format!("{:?}", fields[0]);
+    }
+}

@@ -6,13 +6,13 @@ use riegeli::proto::{
 };
 
 // ---------------------------------------------------------------------------
-// Criterion 25.1: Iterating over a message with varint, fixed32, fixed64,
+// Iterating over a message with varint, fixed32, fixed64,
 // length-delimited, and group fields yields the correct field number, wire
 // type, and value for each field, in order.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_1_all_wire_types() {
+fn all_wire_types() {
     let mut data = Vec::new();
 
     // Field 1, varint, value 150
@@ -70,11 +70,11 @@ fn criterion_25_1_all_wire_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.2: Iterating over an empty slice yields zero items and no error.
+// Iterating over an empty slice yields zero items and no error.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_2_empty_slice() {
+fn empty_slice() {
     let fields: Vec<_> = ProtoFieldIter::new(&[])
         .collect::<Result<Vec<_>, _>>()
         .expect("empty slice should produce no errors");
@@ -82,12 +82,12 @@ fn criterion_25_2_empty_slice() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.3: Iterating over truncated input yields an error at the point
+// Iterating over truncated input yields an error at the point
 // of truncation, not a panic.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_3_truncated_length_delimited() {
+fn truncated_length_delimited() {
     // Field 3, length-delimited, declared length 100 but only 3 bytes available.
     let mut data = Vec::new();
     encode_tag(&mut data, 3, WireType::LengthDelimited);
@@ -103,7 +103,7 @@ fn criterion_25_3_truncated_length_delimited() {
 }
 
 #[test]
-fn criterion_25_3_truncated_fixed32() {
+fn truncated_fixed32() {
     // Field 4, fixed32, but only 2 data bytes.
     let mut data = Vec::new();
     encode_tag(&mut data, 4, WireType::Fixed32);
@@ -115,7 +115,7 @@ fn criterion_25_3_truncated_fixed32() {
 }
 
 #[test]
-fn criterion_25_3_truncated_fixed64() {
+fn truncated_fixed64() {
     // Field 2, fixed64, but only 4 data bytes.
     let mut data = Vec::new();
     encode_tag(&mut data, 2, WireType::Fixed64);
@@ -127,7 +127,7 @@ fn criterion_25_3_truncated_fixed64() {
 }
 
 #[test]
-fn criterion_25_3_truncated_varint() {
+fn truncated_varint() {
     // Field 1, varint, but the value has a continuation bit with no following byte.
     let mut data = Vec::new();
     encode_tag(&mut data, 1, WireType::Varint);
@@ -139,7 +139,7 @@ fn criterion_25_3_truncated_varint() {
 }
 
 #[test]
-fn criterion_25_3_truncated_tag() {
+fn truncated_tag() {
     // A tag byte with continuation bit set, nothing following.
     let data = [0x80];
     let results: Vec<_> = ProtoFieldIter::new(&data).collect();
@@ -148,7 +148,7 @@ fn criterion_25_3_truncated_tag() {
 }
 
 #[test]
-fn criterion_25_3_no_panic_on_all_truncations() {
+fn no_panic_on_all_truncations() {
     // Build a valid message, then iterate over every prefix.
     let mut valid = Vec::new();
     encode_tag(&mut valid, 1, WireType::Varint);
@@ -166,12 +166,12 @@ fn criterion_25_3_no_panic_on_all_truncations() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.4: Iterating over input containing wire types 6 or 7 yields
+// Iterating over input containing wire types 6 or 7 yields
 // an error for the invalid field.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_4_wire_type_6() {
+fn wire_type_6() {
     // Wire type 6 for field 1: (1 << 3) | 6 = 0x0E
     let data = [0x0E];
     let results: Vec<_> = ProtoFieldIter::new(&data).collect();
@@ -180,7 +180,7 @@ fn criterion_25_4_wire_type_6() {
 }
 
 #[test]
-fn criterion_25_4_wire_type_7() {
+fn wire_type_7() {
     // Wire type 7 for field 1: (1 << 3) | 7 = 0x0F
     let data = [0x0F];
     let results: Vec<_> = ProtoFieldIter::new(&data).collect();
@@ -189,7 +189,7 @@ fn criterion_25_4_wire_type_7() {
 }
 
 #[test]
-fn criterion_25_4_valid_then_invalid_wire_type() {
+fn valid_then_invalid_wire_type() {
     // A valid varint field followed by an invalid wire type 6.
     let mut data = Vec::new();
     encode_tag(&mut data, 1, WireType::Varint);
@@ -203,12 +203,12 @@ fn criterion_25_4_valid_then_invalid_wire_type() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.5: make_tag(field_number, wire_type) is callable from an
+// make_tag(field_number, wire_type) is callable from an
 // external crate (it is a public, non-cfg(test) function).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_5_make_tag_public() {
+fn make_tag_public() {
     // This test itself proves make_tag is public and callable from an external
     // crate (this test file is in tests/, which is a separate crate).
     let tag = make_tag(1, WireType::Varint);
@@ -219,13 +219,13 @@ fn criterion_25_5_make_tag_public() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.6: Round-trip: iterating over valid proto bytes and
+// Round-trip: iterating over valid proto bytes and
 // re-serializing each field using the public encoding helpers produces
 // byte-identical output.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_6_round_trip() {
+fn round_trip() {
     let mut original = Vec::new();
 
     // Varint field 1 = 150
@@ -263,7 +263,7 @@ fn criterion_25_6_round_trip() {
 }
 
 #[test]
-fn criterion_25_6_round_trip_edge_values() {
+fn round_trip_edge_values() {
     let mut original = Vec::new();
 
     // Varint field 1 = 0 (single byte)
@@ -295,13 +295,13 @@ fn criterion_25_6_round_trip_edge_values() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 25.7: Nested groups (StartGroup/EndGroup) are yielded as flat
+// Nested groups (StartGroup/EndGroup) are yielded as flat
 // field events — the iterator does not consume group contents automatically,
 // allowing the caller to handle nesting.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_25_7_nested_groups_flat() {
+fn nested_groups_flat() {
     let mut data = Vec::new();
 
     // Outer group field 1: start
@@ -341,7 +341,7 @@ fn criterion_25_7_nested_groups_flat() {
 }
 
 #[test]
-fn criterion_25_7_nested_groups_round_trip() {
+fn nested_groups_round_trip() {
     let mut data = Vec::new();
     encode_tag(&mut data, 1, WireType::StartGroup);
     encode_tag(&mut data, 2, WireType::StartGroup);

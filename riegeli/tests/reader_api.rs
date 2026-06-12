@@ -33,7 +33,7 @@ fn open_reader(data: Vec<u8>) -> RecordReader<Cursor<Vec<u8>>> {
 // ─── Criterion 1 ───────────────────────────────────────────────────────────────
 /// A file written with set_metadata is read back via read_metadata().
 #[test]
-fn criterion_1_set_metadata_round_trip() {
+fn set_metadata_round_trip() {
     let payload = b"test-schema".to_vec();
     let data = write_records(
         &[b"record1", b"record2"],
@@ -48,7 +48,7 @@ fn criterion_1_set_metadata_round_trip() {
 // ─── Criterion 3 ───────────────────────────────────────────────────────────────
 /// last_record_is_valid() is true after a valid read, false after recovery.
 #[test]
-fn criterion_3_last_record_is_valid() {
+fn last_record_is_valid() {
     // Part A: valid reads set last_record_is_valid = true.
     let data = write_records(&[b"a", b"b", b"c"], WriterOptions::new());
     let mut reader = open_reader(data);
@@ -97,7 +97,7 @@ fn criterion_3_last_record_is_valid() {
 // ─── Criterion 4 ───────────────────────────────────────────────────────────────
 /// seek_back() after reading record 5 of 10 returns Ok(true) and re-reads record 5.
 #[test]
-fn criterion_4_seek_back_returns_previous_record() {
+fn seek_back_returns_previous_record() {
     let records: Vec<Vec<u8>> = (0u64..10).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new());
@@ -125,7 +125,7 @@ fn criterion_4_seek_back_returns_previous_record() {
 // ─── Criterion 5 ───────────────────────────────────────────────────────────────
 /// seek_back() at the very first record returns Ok(false).
 #[test]
-fn criterion_5_seek_back_at_start_returns_false() {
+fn seek_back_at_start_returns_false() {
     let data = write_records(&[b"first", b"second"], WriterOptions::new());
     let mut reader = open_reader(data);
 
@@ -137,7 +137,7 @@ fn criterion_5_seek_back_at_start_returns_false() {
 // ─── Criterion 6 ───────────────────────────────────────────────────────────────
 /// size() returns 1000 for a 1000-record file and does not change the read position.
 #[test]
-fn criterion_6_size_returns_count_and_preserves_position() {
+fn size_returns_count_and_preserves_position() {
     let records: Vec<Vec<u8>> = (0u32..1000).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new().chunk_size(1024));
@@ -172,7 +172,7 @@ fn criterion_6_size_returns_count_and_preserves_position() {
 // ─── Criterion 7 ───────────────────────────────────────────────────────────────
 /// check_file_format() returns Ok on a valid file, Err on corrupted data hash.
 #[test]
-fn criterion_7_check_file_format_valid_and_corrupted() {
+fn check_file_format_valid_and_corrupted() {
     // Part A: valid file.
     let data = write_records(&[b"hello", b"world"], WriterOptions::new());
     let mut reader = open_reader(data);
