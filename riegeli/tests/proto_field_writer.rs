@@ -1,15 +1,15 @@
-//! Tests for Sprint 26: SerializedMessageWriter.
+//! Tests for SerializedMessageWriter.
 
 use riegeli::proto::{
     self, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter, WireType,
 };
 
 // ---------------------------------------------------------------------------
-// Criterion 26.1: Varint field_number=1, value=150 => [0x08, 0x96, 0x01]
+// Varint field_number=1, value=150 => [0x08, 0x96, 0x01]
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_1_varint_field_1_value_150() {
+fn varint_field_1_value_150() {
     let mut w = SerializedMessageWriter::new();
     w.write_uint64(1, 150).unwrap();
     let bytes = w.finish().unwrap();
@@ -33,7 +33,7 @@ fn varint_field_u64_max() {
     // tag=0x08, then 10-byte varint for u64::MAX
     assert_eq!(bytes[0], 0x08);
     assert_eq!(bytes.len(), 11); // 1 tag + 10 varint bytes
-    // Verify round-trip
+                                 // Verify round-trip
     let fields: Vec<_> = ProtoFieldIter::new(&bytes)
         .collect::<Result<_, _>>()
         .unwrap();
@@ -42,11 +42,11 @@ fn varint_field_u64_max() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.2: sint32 zigzag encoding
+// sint32 zigzag encoding
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_2_sint32_zigzag_encoding() {
+fn sint32_zigzag_encoding() {
     // -1 encodes as zigzag 1
     let mut w = SerializedMessageWriter::new();
     w.write_sint32(1, -1).unwrap();
@@ -108,11 +108,11 @@ fn zigzag_encode_helpers() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.3: Nested submessage with correct length prefix
+// Nested submessage with correct length prefix
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_3_nested_submessage() {
+fn nested_submessage() {
     let mut w = SerializedMessageWriter::new();
     // Outer field 1 = varint 10
     w.write_uint64(1, 10).unwrap();
@@ -143,11 +143,11 @@ fn criterion_26_3_nested_submessage() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.4: Two-level nested submessages
+// Two-level nested submessages
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_4_two_level_nested() {
+fn two_level_nested() {
     let mut w = SerializedMessageWriter::new();
     // Level 0: open field 1
     w.open_length_delimited(1).unwrap();
@@ -202,11 +202,11 @@ fn criterion_26_4_two_level_nested() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.5: 2 GiB limit error
+// 2 GiB limit error
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_5_length_delimited_exceeds_2gib() {
+fn length_delimited_exceeds_2gib() {
     // We can't actually allocate 2 GiB in a test, but we can test write_bytes
     // with a size check. We'll craft a scenario that triggers the error path.
     // The MAX is i32::MAX = 2,147,483,647. We need data.len() > that.
@@ -249,11 +249,11 @@ fn finish_with_unclosed_scope_is_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.6: Round-trip through field iterator
+// Round-trip through field iterator
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_6_round_trip_all_field_types() {
+fn round_trip_all_field_types() {
     let mut w = SerializedMessageWriter::new();
 
     // Varint (uint64)
@@ -346,11 +346,11 @@ fn round_trip_empty_message() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 26.7: Group open/close tags
+// Group open/close tags
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_26_7_group_tags() {
+fn group_tags() {
     let mut w = SerializedMessageWriter::new();
     w.write_start_group(5).unwrap();
     w.write_uint64(1, 99).unwrap();
@@ -403,7 +403,7 @@ fn nested_groups() {
 }
 
 // ---------------------------------------------------------------------------
-// Additional adversarial / edge case tests
+// Additional edge case tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -556,4 +556,478 @@ fn large_field_number() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(fields[0].field_number, 536_870_911);
+}
+
+// ---------------------------------------------------------------------------
+// Zigzag boundary round-trips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sint32_extreme_values_round_trip() {
+    for value in [i32::MIN, i32::MAX, 0, 1, -1, i32::MIN + 1, i32::MAX - 1] {
+        let mut w = SerializedMessageWriter::new();
+        w.write_sint32(1, value).unwrap();
+        let bytes = w.finish().unwrap();
+        let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].wire_type, WireType::Varint);
+        // Verify the zigzag value
+        if let FieldValue::Varint(v) = fields[0].value {
+            assert_eq!(v, proto::zigzag_encode_i32(value) as u64);
+        } else {
+            panic!("expected Varint");
+        }
+    }
+}
+
+#[test]
+fn sint64_extreme_values_round_trip() {
+    for value in [i64::MIN, i64::MAX, 0, 1, -1, i64::MIN + 1, i64::MAX - 1] {
+        let mut w = SerializedMessageWriter::new();
+        w.write_sint64(1, value).unwrap();
+        let bytes = w.finish().unwrap();
+        let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        if let FieldValue::Varint(v) = fields[0].value {
+            assert_eq!(v, proto::zigzag_encode_i64(value));
+        } else {
+            panic!("expected Varint");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field number edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn max_field_number_all_wire_types() {
+    let max_fn = (1u32 << 29) - 1; // 536_870_911
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(max_fn, 1).unwrap();
+    w.write_fixed32(max_fn, 1).unwrap();
+    w.write_fixed64(max_fn, 1).unwrap();
+    w.write_bytes(max_fn, b"x").unwrap();
+    w.write_start_group(max_fn).unwrap();
+    w.write_end_group(max_fn).unwrap();
+    let bytes = w.finish().unwrap();
+
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 6);
+    for f in &fields {
+        assert_eq!(f.field_number, max_fn);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Float NaN and infinity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_nan_preserved() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_float(1, f32::NAN).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed32(bits) = fields[0].value {
+        assert!(f32::from_bits(bits).is_nan());
+    } else {
+        panic!("expected Fixed32");
+    }
+}
+
+#[test]
+fn float_infinities_preserved() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_float(1, f32::INFINITY).unwrap();
+    w.write_float(2, f32::NEG_INFINITY).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed32(bits) = fields[0].value {
+        assert_eq!(f32::from_bits(bits), f32::INFINITY);
+    } else {
+        panic!("expected Fixed32");
+    }
+    if let FieldValue::Fixed32(bits) = fields[1].value {
+        assert_eq!(f32::from_bits(bits), f32::NEG_INFINITY);
+    } else {
+        panic!("expected Fixed32");
+    }
+}
+
+#[test]
+fn double_nan_preserved() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_double(1, f64::NAN).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed64(bits) = fields[0].value {
+        assert!(f64::from_bits(bits).is_nan());
+    } else {
+        panic!("expected Fixed64");
+    }
+}
+
+#[test]
+fn double_infinities_preserved() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_double(1, f64::INFINITY).unwrap();
+    w.write_double(2, f64::NEG_INFINITY).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed64(bits) = fields[0].value {
+        assert_eq!(f64::from_bits(bits), f64::INFINITY);
+    } else {
+        panic!("expected Fixed64");
+    }
+    if let FieldValue::Fixed64(bits) = fields[1].value {
+        assert_eq!(f64::from_bits(bits), f64::NEG_INFINITY);
+    } else {
+        panic!("expected Fixed64");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sequential sibling submessages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sibling_submessages_correct_lengths() {
+    let mut w = SerializedMessageWriter::new();
+    // First submessage: field 1
+    w.open_length_delimited(1).unwrap();
+    w.write_uint64(1, 42).unwrap(); // [0x08, 0x2A] = 2 bytes
+    w.close_length_delimited().unwrap();
+    // Second submessage: field 2
+    w.open_length_delimited(2).unwrap();
+    w.write_uint64(1, 100).unwrap(); // [0x08, 0x64] = 2 bytes
+    w.close_length_delimited().unwrap();
+    let bytes = w.finish().unwrap();
+
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 2);
+
+    // First LD field
+    assert_eq!(fields[0].field_number, 1);
+    if let FieldValue::LengthDelimited(inner) = &fields[0].value {
+        let inner_fields: Vec<_> = ProtoFieldIter::new(inner)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inner_fields[0].value, FieldValue::Varint(42));
+    } else {
+        panic!("expected LD");
+    }
+
+    // Second LD field
+    assert_eq!(fields[1].field_number, 2);
+    if let FieldValue::LengthDelimited(inner) = &fields[1].value {
+        let inner_fields: Vec<_> = ProtoFieldIter::new(inner)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inner_fields[0].value, FieldValue::Varint(100));
+    } else {
+        panic!("expected LD");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// int32 positive values stay compact (no sign extension)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn int32_positive_encodes_compactly() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_int32(1, 1).unwrap();
+    let bytes = w.finish().unwrap();
+    // tag 0x08, value 0x01 -- just 2 bytes
+    assert_eq!(bytes.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Mixed nesting: group inside a length-delimited submessage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_inside_submessage() {
+    let mut w = SerializedMessageWriter::new();
+    w.open_length_delimited(1).unwrap();
+    w.write_start_group(2).unwrap();
+    w.write_uint64(3, 99).unwrap();
+    w.write_end_group(2).unwrap();
+    w.close_length_delimited().unwrap();
+    let bytes = w.finish().unwrap();
+
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].wire_type, WireType::LengthDelimited);
+
+    if let FieldValue::LengthDelimited(inner) = &fields[0].value {
+        let inner_fields: Vec<_> = ProtoFieldIter::new(inner)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inner_fields.len(), 3);
+        assert_eq!(inner_fields[0].wire_type, WireType::StartGroup);
+        assert_eq!(inner_fields[1].value, FieldValue::Varint(99));
+        assert_eq!(inner_fields[2].wire_type, WireType::EndGroup);
+    } else {
+        panic!("expected LD");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mixed nesting: length-delimited submessage inside a group
+// ---------------------------------------------------------------------------
+
+#[test]
+fn submessage_inside_group() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_start_group(1).unwrap();
+    w.open_length_delimited(2).unwrap();
+    w.write_uint64(3, 42).unwrap();
+    w.close_length_delimited().unwrap();
+    w.write_end_group(1).unwrap();
+    let bytes = w.finish().unwrap();
+
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[0].wire_type, WireType::StartGroup);
+    assert_eq!(fields[0].field_number, 1);
+    assert_eq!(fields[1].wire_type, WireType::LengthDelimited);
+    assert_eq!(fields[1].field_number, 2);
+    assert_eq!(fields[2].wire_type, WireType::EndGroup);
+    assert_eq!(fields[2].field_number, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip with boundary values: write -> iterate -> serialize -> compare
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extreme_values_round_trip_identity() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_int32(1, -1).unwrap();
+    w.write_int64(2, -100).unwrap();
+    w.write_uint32(3, 300).unwrap();
+    w.write_uint64(4, 150).unwrap();
+    w.write_sint32(5, -50).unwrap();
+    w.write_sint64(6, i64::MIN).unwrap();
+    w.write_bool(7, false).unwrap();
+    w.write_fixed32(8, u32::MAX).unwrap();
+    w.write_fixed64(9, u64::MAX).unwrap();
+    w.write_sfixed32(10, i32::MIN).unwrap();
+    w.write_sfixed64(11, i64::MIN).unwrap();
+    w.write_float(12, f32::MIN_POSITIVE).unwrap();
+    w.write_double(13, f64::MAX).unwrap();
+    w.write_bytes(14, &[0xFF; 256]).unwrap();
+    w.write_string(15, "hello\x00world").unwrap(); // embedded null
+    w.open_length_delimited(16).unwrap();
+    w.write_uint64(1, 1).unwrap();
+    w.open_length_delimited(2).unwrap();
+    w.write_uint64(1, 2).unwrap();
+    w.close_length_delimited().unwrap();
+    w.close_length_delimited().unwrap();
+    w.write_start_group(17).unwrap();
+    w.write_uint64(1, 3).unwrap();
+    w.write_end_group(17).unwrap();
+    let bytes = w.finish().unwrap();
+
+    // Iterate
+    let fields: Vec<ProtoField> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    // Re-serialize
+    let mut rewritten = Vec::new();
+    for f in &fields {
+        proto::serialize_field(&mut rewritten, f);
+    }
+
+    assert_eq!(bytes, rewritten, "round-trip must be byte-identical");
+}
+
+// ---------------------------------------------------------------------------
+// Deeply nested submessages (stress test for splice correctness)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ten_level_nested_submessages() {
+    let mut w = SerializedMessageWriter::new();
+    for i in 1..=10u32 {
+        w.open_length_delimited(i).unwrap();
+    }
+    w.write_uint64(1, 42).unwrap();
+    for _ in 0..10 {
+        w.close_length_delimited().unwrap();
+    }
+    let bytes = w.finish().unwrap();
+    assert!(proto::is_proto_message(&bytes));
+
+    // Drill down 10 levels
+    let mut data: &[u8] = &bytes;
+    for expected_fn in 1..=10u32 {
+        let fields: Vec<_> = ProtoFieldIter::new(data).collect::<Result<_, _>>().unwrap();
+        assert_eq!(
+            fields.len(),
+            1,
+            "level {} should have one field",
+            expected_fn
+        );
+        assert_eq!(fields[0].field_number, expected_fn);
+        if expected_fn < 10 {
+            if let FieldValue::LengthDelimited(inner) = &fields[0].value {
+                data = inner;
+            } else {
+                panic!("expected LD at level {}", expected_fn);
+            }
+        }
+    }
+    // At level 10, the inner should have the varint field
+    if let FieldValue::LengthDelimited(inner) =
+        &ProtoFieldIter::new(data).next().unwrap().unwrap().value
+    {
+        let innermost: Vec<_> = ProtoFieldIter::new(inner)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(innermost.len(), 1);
+        assert_eq!(innermost[0].value, FieldValue::Varint(42));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// write_string with empty string
+// ---------------------------------------------------------------------------
+
+#[test]
+fn empty_string_field() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_string(1, "").unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].value, FieldValue::LengthDelimited(&[]));
+}
+
+// ---------------------------------------------------------------------------
+// Verify uint32 max value (no sign extension)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uint32_max_round_trip() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint32(1, u32::MAX).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields[0].value, FieldValue::Varint(u32::MAX as u64));
+}
+
+// ---------------------------------------------------------------------------
+// Verify sfixed32/sfixed64 negative values (two's complement bit patterns)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sfixed32_negative_round_trip() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_sfixed32(1, -1).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed32(bits) = fields[0].value {
+        let val = bits as i32;
+        assert_eq!(val, -1);
+    } else {
+        panic!("expected Fixed32");
+    }
+}
+
+#[test]
+fn sfixed64_min_round_trip() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_sfixed64(1, i64::MIN).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if let FieldValue::Fixed64(bits) = fields[0].value {
+        let val = bits as i64;
+        assert_eq!(val, i64::MIN);
+    } else {
+        panic!("expected Fixed64");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Large bytes field (multi-byte length varint)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn large_bytes_field_round_trip() {
+    let data = vec![0xABu8; 65536];
+    let mut w = SerializedMessageWriter::new();
+    w.write_bytes(1, &data).unwrap();
+    let bytes = w.finish().unwrap();
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    if let FieldValue::LengthDelimited(inner) = &fields[0].value {
+        assert_eq!(inner.len(), 65536);
+        assert!(inner.iter().all(|&b| b == 0xAB));
+    } else {
+        panic!("expected LD");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Submessage with large inner content (length varint > 1 byte)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn submessage_multi_byte_length_prefix() {
+    let mut w = SerializedMessageWriter::new();
+    w.open_length_delimited(1).unwrap();
+    // Write enough data to require a multi-byte length varint (>= 128 bytes)
+    for i in 1..=20u32 {
+        w.write_fixed64(i, i as u64).unwrap(); // each = 1 tag byte + 8 data = 9+ bytes
+    }
+    w.close_length_delimited().unwrap();
+    let bytes = w.finish().unwrap();
+
+    // Verify it round-trips
+    let fields: Vec<_> = ProtoFieldIter::new(&bytes)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    if let FieldValue::LengthDelimited(inner) = &fields[0].value {
+        let inner_fields: Vec<_> = ProtoFieldIter::new(inner)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inner_fields.len(), 20);
+    } else {
+        panic!("expected LD");
+    }
 }

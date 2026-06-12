@@ -46,74 +46,69 @@ fn verify_golden_file(data: &[u8], label: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.1: simple_none.riegeli decoded correctly
+// simple_none.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
-fn criterion_14_1_simple_none() {
+fn simple_none() {
     let data = include_bytes!("../testdata/golden/simple_none.riegeli");
     verify_golden_file(data, "simple_none");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.2: simple_brotli.riegeli decoded correctly
-// Also activates criterion 4.5
+// simple_brotli.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_14_2_simple_brotli() {
+fn simple_brotli() {
     let data = include_bytes!("../testdata/golden/simple_brotli.riegeli");
     verify_golden_file(data, "simple_brotli");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.3: simple_zstd.riegeli decoded correctly
-// Also activates criterion 4.6
+// simple_zstd.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_14_3_simple_zstd() {
+fn simple_zstd() {
     let data = include_bytes!("../testdata/golden/simple_zstd.riegeli");
     verify_golden_file(data, "simple_zstd");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.4: transpose_none.riegeli decoded correctly
-// Activates criterion 9.4
+// transpose_none.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
-fn criterion_14_4_transpose_none() {
+fn transpose_none() {
     let data = include_bytes!("../testdata/golden/transpose_none.riegeli");
     verify_golden_file(data, "transpose_none");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.5: transpose_brotli.riegeli decoded correctly
-// Activates criterion 9.5
+// transpose_brotli.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_14_5_transpose_brotli() {
+fn transpose_brotli() {
     let data = include_bytes!("../testdata/golden/transpose_brotli.riegeli");
     verify_golden_file(data, "transpose_brotli");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.6: transpose_zstd.riegeli decoded correctly
+// transpose_zstd.riegeli decoded correctly
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_14_6_transpose_zstd() {
+fn transpose_zstd() {
     let data = include_bytes!("../testdata/golden/transpose_zstd.riegeli");
     verify_golden_file(data, "transpose_zstd");
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.7: Rust-written simple+Brotli file verified by C++ verifier
-// Activates criterion 12.6
+// Rust-written simple+Brotli file verified by C++ verifier
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_14_7_rust_simple_brotli_verified_by_cpp() {
+fn rust_simple_brotli_verified_by_cpp() {
     let verifier_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -138,11 +133,11 @@ fn criterion_14_7_rust_simple_brotli_verified_by_cpp() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 14.8: Rust-written transpose+Brotli file verified by C++ verifier
+// Rust-written transpose+Brotli file verified by C++ verifier
 // ---------------------------------------------------------------------------
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_14_8_rust_transpose_brotli_verified_by_cpp() {
+fn rust_transpose_brotli_verified_by_cpp() {
     let bazel_path =
         std::path::Path::new("/home/mike.danese/code/riegeli/bazel-bin/tools/verify_rust_file");
     if !bazel_path.exists() {
@@ -207,10 +202,9 @@ fn run_cpp_verification(verifier: &std::path::Path, transpose: bool) {
 
 // ---------------------------------------------------------------------------
 // Additional test: Verify C++ golden file with RecordReader + seek
-// Activates criterion 6.2 (reading C++ golden file)
 // ---------------------------------------------------------------------------
 #[test]
-fn criterion_6_2_read_cpp_golden_file() {
+fn read_cpp_golden_file() {
     // Use the simple_none golden file (no compression needed)
     let data = include_bytes!("../testdata/golden/simple_none.riegeli");
     let cursor = Cursor::new(data.as_slice());

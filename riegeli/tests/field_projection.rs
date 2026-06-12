@@ -74,6 +74,50 @@ fn encode_string_field(field_number: u32, value: &[u8]) -> Vec<u8> {
     out
 }
 
+fn encode_fixed64_field(field_number: u32, value: u64) -> Vec<u8> {
+    let tag = (field_number << 3) | 1u32;
+    let mut out = encode_u32(tag);
+    out.extend_from_slice(&value.to_le_bytes());
+    out
+}
+
+/// Decode the field numbers present in a proto record, in order of appearance.
+fn proto_field_numbers(record: &[u8]) -> Vec<u32> {
+    let mut fields = Vec::new();
+    let mut pos = 0;
+    while pos < record.len() {
+        let (tag, consumed) = match decode_u32(&record[pos..]) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        pos += consumed;
+        fields.push(tag >> 3);
+        // Skip the value.
+        match tag & 7 {
+            0 => {
+                while pos < record.len() {
+                    let b = record[pos];
+                    pos += 1;
+                    if b < 0x80 {
+                        break;
+                    }
+                }
+            }
+            1 => pos += 8,
+            2 => {
+                let (len, c) = match decode_u32(&record[pos..]) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                pos += c + len as usize;
+            }
+            5 => pos += 4,
+            _ => break,
+        }
+    }
+    fields
+}
+
 fn write_records(records: &[&[u8]], opts: WriterOptions) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::<u8>::new());
     {
@@ -131,6 +175,54 @@ fn test_empty_projection_returns_empty_proto_records() {
         assert!(
             rec.is_empty(),
             "record {i} should be empty with empty projection, got {} bytes",
+            rec.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Empty projection over multi-bucket data returns empty records
+// ---------------------------------------------------------------------------
+
+/// With an empty projection every data bucket is prunable. When the file
+/// spans multiple buckets (non-default bucket_fraction), reads must still
+/// return the right number of records, each empty.
+#[test]
+fn empty_projection_multi_bucket_returns_empty_records() {
+    let records: Vec<Vec<u8>> = (0..300u64)
+        .map(|i| {
+            let mut r = Vec::new();
+            r.extend_from_slice(&encode_varint_field(1, i + 1));
+            r.extend_from_slice(&encode_fixed32_field(2, (i as u32) * 3));
+            r.extend_from_slice(&encode_string_field(
+                3,
+                format!("payload-a-{i:04}").as_bytes(),
+            ));
+            r.extend_from_slice(&encode_string_field(
+                4,
+                format!("payload-b-{i:04}").as_bytes(),
+            ));
+            r
+        })
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+
+    // bucket_fraction 0.001 with the default 1 MiB chunk clamps the bucket
+    // size to 4 KiB; the string data buffers alone exceed that, so the chunk
+    // holds multiple buckets.
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .bucket_fraction(0.001)
+        .compression(CompressionType::None);
+    let data = write_records(&record_refs, opts);
+
+    let proj = FieldProjection::new();
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(results.len(), 300, "should still get 300 records");
+    for (i, rec) in results.iter().enumerate() {
+        assert!(
+            rec.is_empty(),
+            "empty projection should yield empty record at {i}, got {} bytes",
             rec.len()
         );
     }
@@ -354,5 +446,186 @@ fn test_size_does_not_discard_projection() {
     assert_eq!(
         count, 10,
         "should read all 10 records with projection intact"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Excluded submessage sibling is skipped; output is byte-exact
+// ---------------------------------------------------------------------------
+
+/// Record: field 1 (varint) + field 2 (submessage containing field 3).
+/// Projecting only field 1 must skip the submessage entirely and emit
+/// exactly the field-1 encoding — no leaked tag or interior bytes.
+#[test]
+fn excluded_submessage_omitted_byte_exact() {
+    let inner = encode_varint_field(3, 7);
+    let mut record = encode_varint_field(1, 42);
+    record.extend_from_slice(&encode_string_field(2, &inner));
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&[record.as_slice()], opts);
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], encode_varint_field(1, 42));
+}
+
+// ---------------------------------------------------------------------------
+// Projected fixed-width fields survive byte-exact; siblings are excluded
+// ---------------------------------------------------------------------------
+
+/// Projecting a fixed32 field must preserve its exact bytes and drop the
+/// excluded varint sibling.
+#[test]
+fn fixed32_projection_preserves_value() {
+    let mut record = encode_varint_field(1, 100);
+    record.extend_from_slice(&encode_fixed32_field(2, 0xDEADBEEF));
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&[record.as_slice()], opts);
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![2]));
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], encode_fixed32_field(2, 0xDEADBEEF));
+}
+
+/// Projecting a fixed64 field must preserve its exact bytes and drop the
+/// excluded varint sibling.
+#[test]
+fn fixed64_projection_preserves_value() {
+    let mut record = encode_varint_field(1, 100);
+    record.extend_from_slice(&encode_fixed64_field(2, 0xCAFEBABECAFEBABE));
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&[record.as_slice()], opts);
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![2]));
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], encode_fixed64_field(2, 0xCAFEBABECAFEBABE));
+}
+
+// ---------------------------------------------------------------------------
+// Wide records: many sibling buffers must be skipped around the projection
+// ---------------------------------------------------------------------------
+
+/// Wide record (20 varint fields), project field 7 only. The decoder must
+/// skip the 19 sibling buffers and the output must contain exactly field 7.
+#[test]
+fn wide_record_middle_field_projection() {
+    let records: Vec<Vec<u8>> = (0..50u64)
+        .map(|i| {
+            let mut r = Vec::new();
+            for f in 1..=20u32 {
+                r.extend_from_slice(&encode_varint_field(f, i * 100 + f as u64));
+            }
+            r
+        })
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&record_refs, opts);
+
+    let proj = FieldProjection::new().add_field(Field::new(vec![7]));
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+
+    assert_eq!(results.len(), 50);
+    for (i, rec) in results.iter().enumerate() {
+        let field_numbers = proto_field_numbers(rec);
+        assert_eq!(
+            field_numbers,
+            vec![7],
+            "record {i}: expected only field 7, got {:?}",
+            field_numbers
+        );
+    }
+}
+
+/// Project two non-adjacent fields from a wide record (15 varint fields).
+/// Exactly those two fields must appear — nothing else.
+#[test]
+fn nonadjacent_fields_projection_wide_record() {
+    let records: Vec<Vec<u8>> = (0..30u64)
+        .map(|i| {
+            let mut r = Vec::new();
+            for f in 1..=15u32 {
+                r.extend_from_slice(&encode_varint_field(f, i + f as u64));
+            }
+            r
+        })
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&record_refs, opts);
+
+    let proj = FieldProjection::new()
+        .add_field(Field::new(vec![3]))
+        .add_field(Field::new(vec![11]));
+    let results = read_all(&data, ReaderOptions::new().field_projection(proj));
+
+    assert_eq!(results.len(), 30);
+    for (i, rec) in results.iter().enumerate() {
+        let field_numbers = proto_field_numbers(rec);
+        assert!(
+            field_numbers.contains(&3) && field_numbers.contains(&11),
+            "record {i}: expected fields 3 and 11, got {:?}",
+            field_numbers
+        );
+        assert_eq!(
+            field_numbers.len(),
+            2,
+            "record {i}: expected exactly 2 fields, got {}",
+            field_numbers.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FieldProjection::all() is byte-identical to reading without a projection
+// ---------------------------------------------------------------------------
+
+/// Projecting all fields must be byte-identical to no projection — the
+/// projection code path must not corrupt data even when everything is
+/// included, across mixed wire types (varint, fixed32, bytes).
+#[test]
+fn all_projection_matches_unprojected_read() {
+    let records: Vec<Vec<u8>> = (0..20u64)
+        .map(|i| {
+            let mut r = encode_varint_field(1, i);
+            r.extend_from_slice(&encode_fixed32_field(2, i as u32 * 7));
+            r.extend_from_slice(&encode_string_field(3, &[0xAB; 30]));
+            r
+        })
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&record_refs, opts);
+
+    let no_proj = read_all(&data, ReaderOptions::new());
+    let with_all = read_all(
+        &data,
+        ReaderOptions::new().field_projection(FieldProjection::all()),
+    );
+
+    assert_eq!(
+        no_proj, with_all,
+        "FieldProjection::all() should be identical to no projection"
     );
 }

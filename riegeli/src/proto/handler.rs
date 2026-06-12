@@ -377,3 +377,64 @@ pub fn read_message<H: HandleField>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::SerializedMessageWriter;
+
+    /// A handler for field 1 that only overrides `handle_varint`.
+    struct VarintOnlyField1 {
+        values: Vec<u64>,
+    }
+
+    impl FieldHandler for VarintOnlyField1 {
+        const FIELD_NUMBER: u32 = 1;
+        fn handle_varint(&mut self, value: u64) -> Result<(), crate::RiegeliError> {
+            self.values.push(value);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_handler_methods_ignore_other_wire_types() {
+        // Field 1 is fixed32, but the handler only overrides handle_varint.
+        // The default handle_fixed32 returns Ok(()), so the field counts as
+        // handled (dispatched) while the varint collector stays empty.
+        let mut w = SerializedMessageWriter::new();
+        w.write_fixed32(1, 0xABCD).unwrap();
+        let data = w.finish().unwrap();
+
+        let mut handler = StaticHandlerSet::new(VarintOnlyField1 { values: vec![] });
+        read_message(&data, &mut handler).unwrap();
+
+        // The handler should not have collected any varint values.
+        assert!(handler.h1.values.is_empty());
+    }
+
+    #[test]
+    fn reregistering_dynamic_handler_replaces_previous() {
+        // Registering a second handler for the same (field number, wire type)
+        // key replaces the first.
+        let mut w = SerializedMessageWriter::new();
+        w.write_uint64(1, 42).unwrap();
+        let data = w.finish().unwrap();
+
+        let result = std::cell::RefCell::new(0u64);
+        {
+            let r = &result;
+            let mut handlers = DynamicHandlerSet::new();
+            // Register first handler
+            handlers.on_varint(1, |_| {
+                panic!("first handler should have been replaced");
+            });
+            // Replace with second handler
+            handlers.on_varint(1, move |v| {
+                *r.borrow_mut() = v;
+                Ok(())
+            });
+            read_message(&data, &mut handlers).unwrap();
+        }
+        assert_eq!(*result.borrow(), 42);
+    }
+}

@@ -149,7 +149,7 @@ fn write_records(records: &[Vec<u8>], opts: WriterOptions) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.3: search finds record 500 in 1000-record sorted file
+// search finds record 500 in 1000-record sorted file
 // ---------------------------------------------------------------------------
 
 /// Encode a u64 value as a big-endian sortable bytes for records.
@@ -204,7 +204,7 @@ fn test_search_finds_middle_record() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.4: search for absent value returns Ok(false)
+// search for absent value returns Ok(false)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -228,7 +228,7 @@ fn test_search_absent_value() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.5: search for first record (value 0)
+// search for first record (value 0)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -252,7 +252,7 @@ fn test_search_first_record() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.6: search for last record (value 999)
+// search for last record (value 999)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -276,7 +276,7 @@ fn test_search_last_record() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.7: search on empty file returns Ok(false)
+// search on empty file returns Ok(false)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -292,7 +292,7 @@ fn test_search_empty_file() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 19.8: O(log N) closure calls
+// O(log N) closure calls
 // ---------------------------------------------------------------------------
 
 #[test]

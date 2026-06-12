@@ -33,7 +33,7 @@ fn build_test_message() -> Vec<u8> {
 }
 
 // ===========================================================================
-// Criterion 28.1: Filtering for fields {1, 3} yields only those fields
+// Filtering for fields {1, 3} yields only those fields
 // ===========================================================================
 
 #[test]
@@ -91,7 +91,7 @@ fn filter_all_fields_yields_same_as_unfiltered() {
 }
 
 // ===========================================================================
-// Criterion 28.2: Filtering for absent field yields empty result
+// Filtering for absent field yields empty result
 // ===========================================================================
 
 #[test]
@@ -125,6 +125,22 @@ fn filter_empty_field_set_yields_empty() {
 }
 
 #[test]
+fn filter_allowed_set_with_duplicates() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(1, 42).unwrap();
+    w.write_uint64(2, 99).unwrap();
+    let data = w.finish().unwrap();
+
+    // Duplicate entries in the allowed set must not change the result.
+    let fields: Vec<ProtoField> = FilteredFieldIter::new(&data, &[1, 1, 1])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].field_number, 1);
+    assert_eq!(fields[0].value, FieldValue::Varint(42));
+}
+
+#[test]
 fn filter_absent_and_present_fields() {
     let data = build_test_message();
     // Field 1 exists, field 99 does not.
@@ -137,7 +153,7 @@ fn filter_absent_and_present_fields() {
 }
 
 // ===========================================================================
-// Criterion 28.3: Field copier produces valid proto with byte-identical values
+// Field copier produces valid proto with byte-identical values
 // ===========================================================================
 
 #[test]
@@ -205,7 +221,7 @@ fn copy_fields_absent_field_produces_empty_message() {
 }
 
 // ===========================================================================
-// Criterion 28.4: Field copier preserves field ordering
+// Field copier preserves field ordering
 // ===========================================================================
 
 #[test]
@@ -253,7 +269,99 @@ fn copy_fields_preserves_repeated_field_ordering() {
 }
 
 // ===========================================================================
-// Criterion 28.5: Two handlers with different mutable contexts compose
+// Copying around group fields
+// ===========================================================================
+
+#[test]
+fn copy_fields_skips_unselected_group() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(1, 42).unwrap();
+    w.write_start_group(2).unwrap();
+    w.write_end_group(2).unwrap();
+    w.write_uint64(3, 99).unwrap();
+    let data = w.finish().unwrap();
+
+    // Copy only the varint fields; the unselected group must be skipped.
+    let mut writer = SerializedMessageWriter::new();
+    copy_fields(&data, &[1, 3], &mut writer).unwrap();
+    let output = writer.finish().unwrap();
+
+    let fields: Vec<ProtoField> = ProtoFieldIter::new(&output)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].field_number, 1);
+    assert_eq!(fields[0].value, FieldValue::Varint(42));
+    assert_eq!(fields[1].field_number, 3);
+    assert_eq!(fields[1].value, FieldValue::Varint(99));
+}
+
+#[test]
+fn copy_fields_preserves_group_start_end_tags() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(1, 10).unwrap();
+    w.write_start_group(2).unwrap();
+    w.write_end_group(2).unwrap();
+    w.write_uint64(3, 30).unwrap();
+    let data = w.finish().unwrap();
+
+    // Copy group field 2 — both the start and end tags share field_number=2
+    // and both must survive the copy.
+    let mut writer = SerializedMessageWriter::new();
+    copy_fields(&data, &[2], &mut writer).unwrap();
+    let output = writer.finish().unwrap();
+
+    let fields: Vec<ProtoField> = ProtoFieldIter::new(&output)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].wire_type, WireType::StartGroup);
+    assert_eq!(fields[0].field_number, 2);
+    assert_eq!(fields[1].wire_type, WireType::EndGroup);
+    assert_eq!(fields[1].field_number, 2);
+}
+
+// ===========================================================================
+// Filter / copy round-trip agreement
+// ===========================================================================
+
+#[test]
+fn filtered_fields_match_copied_output() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(1, 111).unwrap();
+    w.write_bytes(2, b"test data").unwrap();
+    w.write_fixed32(3, 0xABCD).unwrap();
+    w.write_fixed64(4, 0x123456789ABCDEF0).unwrap();
+    w.write_bytes(5, b"more bytes").unwrap();
+    let data = w.finish().unwrap();
+
+    // Step 1: filter for {2, 4}
+    let filtered: Vec<ProtoField> = FilteredFieldIter::new(&data, &[2, 4])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(filtered.len(), 2);
+
+    // Step 2: copy those fields to a new writer
+    let mut writer = SerializedMessageWriter::new();
+    copy_fields(&data, &[2, 4], &mut writer).unwrap();
+    let copied = writer.finish().unwrap();
+
+    // Step 3: iterate the copied output
+    let result: Vec<ProtoField> = ProtoFieldIter::new(&copied)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].field_number, 2);
+    assert_eq!(result[0].value, FieldValue::LengthDelimited(b"test data"));
+    assert_eq!(result[1].field_number, 4);
+    assert_eq!(result[1].value, FieldValue::Fixed64(0x123456789ABCDEF0));
+
+    // Step 4: the re-parsed copy must match the filtered view.
+    assert_eq!(result, filtered);
+}
+
+// ===========================================================================
+// Two handlers with different mutable contexts compose
 // ===========================================================================
 
 /// Handler that accumulates varint sums for a given field number.
@@ -394,7 +502,78 @@ fn compose_three_handlers_different_contexts() {
 }
 
 // ===========================================================================
-// Criterion 28.6: No per-field heap allocation
+// Three composed handlers with disjoint mutable contexts, including a
+// fixed64 handler, dispatch correctly in a single pass.
+// ===========================================================================
+
+struct VarintAccum<'a> {
+    vals: &'a mut Vec<u64>,
+}
+impl<'a> FieldHandler for VarintAccum<'a> {
+    const FIELD_NUMBER: u32 = 1;
+    fn handle_varint(&mut self, value: u64) -> Result<(), riegeli::RiegeliError> {
+        self.vals.push(value);
+        Ok(())
+    }
+}
+
+struct BytesAccum<'a> {
+    lens: &'a mut Vec<usize>,
+}
+impl<'a> FieldHandler for BytesAccum<'a> {
+    const FIELD_NUMBER: u32 = 2;
+    fn handle_length_delimited(&mut self, data: &[u8]) -> Result<(), riegeli::RiegeliError> {
+        self.lens.push(data.len());
+        Ok(())
+    }
+}
+
+struct Fixed64Accum<'a> {
+    vals: &'a mut Vec<u64>,
+}
+impl<'a> FieldHandler for Fixed64Accum<'a> {
+    const FIELD_NUMBER: u32 = 3;
+    fn handle_fixed64(&mut self, value: u64) -> Result<(), riegeli::RiegeliError> {
+        self.vals.push(value);
+        Ok(())
+    }
+}
+
+#[test]
+fn compose_handlers_fixed64_dispatch() {
+    let mut w = SerializedMessageWriter::new();
+    w.write_uint64(1, 10).unwrap();
+    w.write_bytes(2, b"abc").unwrap();
+    w.write_fixed64(3, 0xCAFE).unwrap();
+    w.write_uint64(1, 20).unwrap();
+    w.write_bytes(2, b"defgh").unwrap();
+    w.write_fixed64(3, 0xBEEF).unwrap();
+    w.write_uint64(4, 9999).unwrap(); // unhandled
+    let data = w.finish().unwrap();
+
+    let mut varints: Vec<u64> = Vec::new();
+    let mut byte_lens: Vec<usize> = Vec::new();
+    let mut fixed64s: Vec<u64> = Vec::new();
+
+    {
+        let h1 = VarintAccum { vals: &mut varints };
+        let h2 = BytesAccum {
+            lens: &mut byte_lens,
+        };
+        let h3 = Fixed64Accum {
+            vals: &mut fixed64s,
+        };
+        let mut handlers = StaticHandlerSet::new(h1).and(h2).and(h3);
+        read_message(&data, &mut handlers).unwrap();
+    }
+
+    assert_eq!(varints, vec![10, 20]);
+    assert_eq!(byte_lens, vec![3, 5]);
+    assert_eq!(fixed64s, vec![0xCAFE, 0xBEEF]);
+}
+
+// ===========================================================================
+// No per-field heap allocation
 // ===========================================================================
 
 // This criterion is structural: the static handler set uses generics and trait

@@ -1,4 +1,5 @@
-//! Sprint 29 tests: End-to-End Streaming and Cross-Language Conformance.
+//! End-to-end streaming and cross-language conformance tests for the proto
+//! streaming module.
 
 // Some imports are used only by feature-gated tests; in reduced-feature
 // builds they would otherwise trip unused_imports.
@@ -60,12 +61,12 @@ fn rust_read_records(data: &[u8]) -> Vec<Vec<u8>> {
 }
 
 // ===========================================================================
-// Criterion 29.1: Streaming columnar extraction of a single varint field
+// Streaming columnar extraction of a single varint field
 //   from 1000 records produces a Vec of 1000 values matching full deser.
 // ===========================================================================
 
 #[test]
-fn criterion_29_1_columnar_extraction_1000_records() {
+fn columnar_extraction_1000_records() {
     let records: Vec<Vec<u8>> = (0..1000u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -79,7 +80,7 @@ fn criterion_29_1_columnar_extraction_1000_records() {
 }
 
 #[test]
-fn criterion_29_1_columnar_extraction_matches_manual_deserialization() {
+fn columnar_extraction_matches_manual_deserialization() {
     let records: Vec<Vec<u8>> = (0..1000u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -104,12 +105,12 @@ fn criterion_29_1_columnar_extraction_matches_manual_deserialization() {
 }
 
 // ===========================================================================
-// Criterion 29.2: Field filter for {1, 2} read-write pipeline produces
+// Field filter for {1, 2} read-write pipeline produces
 //   records containing only fields 1 and 2.
 // ===========================================================================
 
 #[test]
-fn criterion_29_2_field_filter_read_write_pipeline() {
+fn field_filter_read_write_pipeline() {
     let records: Vec<Vec<u8>> = (0..50u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -158,12 +159,12 @@ fn criterion_29_2_field_filter_read_write_pipeline() {
 }
 
 // ===========================================================================
-// Criterion 29.3: Streaming API works with both simple and transpose chunk
+// Streaming API works with both simple and transpose chunk
 //   encodings.
 // ===========================================================================
 
 #[test]
-fn criterion_29_3_simple_encoding() {
+fn simple_encoding() {
     let records: Vec<Vec<u8>> = (0..100u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -176,7 +177,7 @@ fn criterion_29_3_simple_encoding() {
 }
 
 #[test]
-fn criterion_29_3_transpose_encoding() {
+fn transpose_encoding() {
     let records: Vec<Vec<u8>> = (0..100u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new().transpose(true));
 
@@ -189,7 +190,7 @@ fn criterion_29_3_transpose_encoding() {
 }
 
 #[test]
-fn criterion_29_3_filter_with_transpose() {
+fn filter_with_transpose() {
     let records: Vec<Vec<u8>> = (0..50u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new().transpose(true));
 
@@ -220,7 +221,7 @@ fn criterion_29_3_filter_with_transpose() {
 }
 
 #[test]
-fn criterion_29_3_for_each_with_both_encodings() {
+fn for_each_with_both_encodings() {
     use std::cell::Cell;
 
     for transpose in [false, true] {
@@ -249,12 +250,12 @@ fn criterion_29_3_for_each_with_both_encodings() {
 }
 
 // ===========================================================================
-// Criterion 29.4: Non-proto records are not dispatched to field handlers
+// Non-proto records are not dispatched to field handlers
 //   but can be handled by a fallback callback.
 // ===========================================================================
 
 #[test]
-fn criterion_29_4_non_proto_records_fallback() {
+fn non_proto_records_fallback() {
     use std::cell::RefCell;
 
     // Write a mix of proto and non-proto records.
@@ -292,7 +293,7 @@ fn criterion_29_4_non_proto_records_fallback() {
 }
 
 #[test]
-fn criterion_29_4_non_proto_skipped_without_fallback() {
+fn non_proto_skipped_without_fallback() {
     use std::cell::Cell;
 
     let all_records = vec![build_test_message(42), b"not proto".to_vec()];
@@ -313,11 +314,11 @@ fn criterion_29_4_non_proto_skipped_without_fallback() {
 }
 
 // ===========================================================================
-// Criterion 29.5: Handler error mid-stream includes record index context.
+// Handler error mid-stream includes record index context.
 // ===========================================================================
 
 #[test]
-fn criterion_29_5_handler_error_includes_record_index() {
+fn handler_error_includes_record_index() {
     let records: Vec<Vec<u8>> = (0..10u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -350,7 +351,7 @@ fn criterion_29_5_handler_error_includes_record_index() {
 }
 
 #[test]
-fn criterion_29_5_error_at_first_record() {
+fn error_at_first_record() {
     let records: Vec<Vec<u8>> = (0..5u64).map(build_test_message).collect();
     let file_bytes = rust_write_records(&records, WriterOptions::new());
 
@@ -369,13 +370,13 @@ fn criterion_29_5_error_at_first_record() {
 }
 
 // ===========================================================================
-// Criterion 29.6: Field iteration over a proto message serialized by the C++
+// Field iteration over a proto message serialized by the C++
 //   protobuf library produces results consistent with the C++ riegeli field
 //   iteration, verified via the existing FFI bridge.
 // ===========================================================================
 
 #[test]
-fn criterion_29_6_cpp_written_records_field_iteration_consistent() {
+fn cpp_written_records_field_iteration_consistent() {
     // Build proto messages in Rust and write them via C++ FFI writer.
     let records: Vec<Vec<u8>> = (0..100u64).map(build_test_message).collect();
 
@@ -437,7 +438,7 @@ fn criterion_29_6_cpp_written_records_field_iteration_consistent() {
 }
 
 #[test]
-fn criterion_29_6_cpp_transpose_field_iteration() {
+fn cpp_transpose_field_iteration() {
     // Same test with transpose encoding.
     let records: Vec<Vec<u8>> = (0..50u64).map(build_test_message).collect();
 
@@ -477,12 +478,12 @@ fn criterion_29_6_cpp_transpose_field_iteration() {
 }
 
 // ===========================================================================
-// Criterion 29.7: Round-trip (iterate -> write) of messages written by C++
+// Round-trip (iterate -> write) of messages written by C++
 //   riegeli produces byte-identical output to the original, verified via FFI.
 // ===========================================================================
 
 #[test]
-fn criterion_29_7_roundtrip_iterate_write_byte_identical() {
+fn roundtrip_iterate_write_byte_identical() {
     // Write records via C++ FFI writer.
     let records: Vec<Vec<u8>> = (0..100u64).map(build_test_message).collect();
 
@@ -537,7 +538,7 @@ fn criterion_29_7_roundtrip_iterate_write_byte_identical() {
 }
 
 #[test]
-fn criterion_29_7_roundtrip_with_complex_messages() {
+fn roundtrip_with_complex_messages() {
     // Build more complex messages with nested submessages.
     let mut records = Vec::new();
     for i in 0..50u64 {
@@ -640,6 +641,256 @@ fn adversarial_filter_preserves_empty_proto_records() {
     // Empty records should remain empty after filtering.
     assert!(filtered_records[0].is_empty());
     assert!(filtered_records[2].is_empty());
+}
+
+// ===========================================================================
+// Zero-record (empty) files
+// ===========================================================================
+
+#[test]
+fn for_each_on_empty_file() {
+    use std::cell::Cell;
+
+    let file_bytes = rust_write_records(&[], WriterOptions::new());
+    let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+
+    let count = Cell::new(0usize);
+    let mut handlers = DynamicHandlerSet::new();
+    handlers.on_varint(1, |_v| {
+        count.set(count.get() + 1);
+        Ok(())
+    });
+
+    for_each_proto_record::<_, _, fn(usize, &[u8])>(&mut reader, &mut handlers, None).unwrap();
+    assert_eq!(count.get(), 0);
+}
+
+#[test]
+fn filter_fields_on_empty_file() {
+    let file_bytes = rust_write_records(&[], WriterOptions::new());
+    let mut output_buf = Cursor::new(Vec::new());
+    {
+        let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+        let mut writer = RecordWriter::new(&mut output_buf, WriterOptions::new()).unwrap();
+        filter_fields_to_writer(&mut reader, &mut writer, &[1, 2]).unwrap();
+        writer.flush().unwrap();
+    }
+    let filtered = rust_read_records(&output_buf.into_inner());
+    assert!(filtered.is_empty());
+}
+
+// ===========================================================================
+// Handler error at the last record reports the exact index (no off-by-one).
+// ===========================================================================
+
+#[test]
+fn handler_error_at_last_record() {
+    let n = 10u64;
+    let records: Vec<Vec<u8>> = (0..n).map(build_test_message).collect();
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+    let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+
+    let mut handlers = DynamicHandlerSet::new();
+    handlers.on_varint(1, |v| {
+        if v == n - 1 {
+            Err(riegeli::RiegeliError::MalformedData("fail at last".into()))
+        } else {
+            Ok(())
+        }
+    });
+
+    let err = for_each_proto_record::<_, _, fn(usize, &[u8])>(&mut reader, &mut handlers, None)
+        .unwrap_err();
+    assert_eq!(
+        err.record_index,
+        (n - 1) as usize,
+        "error should be at last record index"
+    );
+}
+
+// ===========================================================================
+// Extracting a column for a field absent from every record yields an empty vec.
+// ===========================================================================
+
+#[test]
+fn extract_column_for_absent_field_yields_empty() {
+    let records: Vec<Vec<u8>> = (0..100u64).map(build_test_message).collect();
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+    let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+
+    // Field 999 doesn't exist in any record.
+    let values = extract_varint_column(&mut reader, 999).unwrap();
+    assert!(
+        values.is_empty(),
+        "extracting nonexistent field should yield empty vec"
+    );
+}
+
+// ===========================================================================
+// Filtering with a field set that matches nothing keeps the records but
+// strips all of their fields.
+// ===========================================================================
+
+#[test]
+fn filter_unmatched_fields_yields_empty_records() {
+    // build_test_message has fields 1, 2, 3. Filter to {99, 100} -> empty records.
+    let records: Vec<Vec<u8>> = (0..10u64).map(build_test_message).collect();
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+
+    let mut output_buf = Cursor::new(Vec::new());
+    {
+        let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+        let mut writer = RecordWriter::new(&mut output_buf, WriterOptions::new()).unwrap();
+        filter_fields_to_writer(&mut reader, &mut writer, &[99, 100]).unwrap();
+        writer.flush().unwrap();
+    }
+    let filtered = rust_read_records(&output_buf.into_inner());
+    assert_eq!(filtered.len(), 10, "should still have 10 records");
+    for (i, rec) in filtered.iter().enumerate() {
+        assert!(rec.is_empty(), "record {i} should be empty after filtering");
+    }
+}
+
+// ===========================================================================
+// StreamError.record_index counts skipped non-proto records too: the index
+// reported on a handler error is the record's position in the file.
+// ===========================================================================
+
+#[test]
+fn handler_error_index_counts_non_proto_records() {
+    // Mix: [non-proto, proto(0), non-proto, proto(1), proto(2)]
+    // Error at proto value=1, which is record index 3
+    let records = vec![
+        b"text".to_vec(),      // 0
+        build_test_message(0), // 1
+        b"text2".to_vec(),     // 2
+        build_test_message(1), // 3 -- error here
+        build_test_message(2), // 4
+    ];
+
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+    let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+
+    let mut handlers = DynamicHandlerSet::new();
+    handlers.on_varint(1, |v| {
+        if v == 1 {
+            Err(riegeli::RiegeliError::MalformedData("boom".into()))
+        } else {
+            Ok(())
+        }
+    });
+
+    let mut fallback = |_idx: usize, _data: &[u8]| {};
+    let err = for_each_proto_record(&mut reader, &mut handlers, Some(&mut fallback)).unwrap_err();
+    assert_eq!(
+        err.record_index, 3,
+        "record index should be 3 (accounting for non-proto records)"
+    );
+}
+
+// ===========================================================================
+// Empty records are valid field-less protos: for_each_proto_record neither
+// dispatches them to handlers nor treats them as errors.
+// ===========================================================================
+
+#[test]
+fn for_each_handles_empty_proto_records() {
+    use std::cell::RefCell;
+
+    // Empty bytes are valid proto messages (no fields).
+    let records = vec![vec![], vec![], build_test_message(42), vec![]];
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+    let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+
+    let varint_values = RefCell::new(Vec::new());
+    let mut handlers = DynamicHandlerSet::new();
+    handlers.on_varint(1, |v| {
+        varint_values.borrow_mut().push(v);
+        Ok(())
+    });
+
+    for_each_proto_record::<_, _, fn(usize, &[u8])>(&mut reader, &mut handlers, None).unwrap();
+    // Only record index 2 has field 1
+    assert_eq!(*varint_values.borrow(), vec![42u64]);
+}
+
+// ===========================================================================
+// filter_fields_to_writer passes non-proto records through unchanged.
+// ===========================================================================
+
+#[test]
+fn filter_passes_non_proto_records_through() {
+    let records = vec![
+        build_test_message(1),
+        b"plain text record".to_vec(),
+        build_test_message(2),
+    ];
+
+    let file_bytes = rust_write_records(&records, WriterOptions::new());
+    let mut output_buf = Cursor::new(Vec::new());
+    {
+        let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+        let mut writer = RecordWriter::new(&mut output_buf, WriterOptions::new()).unwrap();
+        filter_fields_to_writer(&mut reader, &mut writer, &[1]).unwrap();
+        writer.flush().unwrap();
+    }
+    let filtered = rust_read_records(&output_buf.into_inner());
+    assert_eq!(filtered.len(), 3);
+
+    // Record 0: proto, only field 1
+    let fields: Vec<ProtoField> = ProtoFieldIter::new(&filtered[0])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].field_number, 1);
+
+    // Record 1: non-proto, passed through unchanged
+    assert_eq!(filtered[1], b"plain text record".to_vec());
+
+    // Record 2: proto, only field 1
+    let fields2: Vec<ProtoField> = ProtoFieldIter::new(&filtered[2])
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(fields2.len(), 1);
+    assert_eq!(fields2[0].field_number, 1);
+}
+
+// ===========================================================================
+// Filtering a transpose-encoded file that mixes proto and non-proto records:
+// proto records are filtered, non-proto records pass through.
+// ===========================================================================
+
+#[test]
+fn filter_transpose_with_non_proto_mix() {
+    let records = vec![
+        build_test_message(10),
+        b"not proto".to_vec(),
+        build_test_message(20),
+    ];
+
+    let file_bytes = rust_write_records(&records, WriterOptions::new().transpose(true));
+    let mut output_buf = Cursor::new(Vec::new());
+    {
+        let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
+        let mut writer = RecordWriter::new(&mut output_buf, WriterOptions::new()).unwrap();
+        filter_fields_to_writer(&mut reader, &mut writer, &[1]).unwrap();
+        writer.flush().unwrap();
+    }
+    let filtered = rust_read_records(&output_buf.into_inner());
+    assert_eq!(filtered.len(), 3);
+
+    // Verify proto records only have field 1
+    for idx in [0, 2] {
+        let fields: Vec<ProtoField> = ProtoFieldIter::new(&filtered[idx])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            fields.iter().all(|f| f.field_number == 1),
+            "record {idx}: should only have field 1"
+        );
+    }
+    // Non-proto record passed through
+    assert_eq!(filtered[1], b"not proto".to_vec());
 }
 
 #[test]
