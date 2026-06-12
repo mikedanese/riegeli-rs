@@ -246,12 +246,9 @@ fn seek_numeric_edge_positions() {
     let cursor = Cursor::new(data.clone());
     let mut reader = RecordReader::new(cursor, ReaderOptions::new()).expect("reader new");
     let result = reader.seek_numeric(24);
-    match result {
-        Ok(()) => {
-            // Should still be able to read something or get None
-            let _ = reader.read_record();
-        }
-        Err(_) => {} // acceptable
+    // Err is acceptable; on Ok we should still be able to read something or get None.
+    if result.is_ok() {
+        let _ = reader.read_record();
     }
 
     // Seek to position 64 (first data chunk)

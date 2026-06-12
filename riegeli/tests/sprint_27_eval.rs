@@ -9,12 +9,11 @@
     allow(unused_imports)
 )]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use riegeli::RiegeliError;
 use riegeli::proto::{
-    DynamicHandlerSet, EmptyHandlerSet, FieldHandler, HandleField, ProtoField,
-    SerializedMessageWriter, StaticHandlerSet, WireType, make_tag, read_message,
+    DynamicHandlerSet, EmptyHandlerSet, FieldHandler, SerializedMessageWriter, StaticHandlerSet,
+    WireType, make_tag, read_message,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,7 +136,7 @@ fn adv_dynamic_many_fields() {
         let mut handlers = DynamicHandlerSet::new();
         // Register handlers for all 15 fields.
         for field_num in 1..=15u32 {
-            let c2 = &*c;
+            let c2 = c;
             handlers.on_varint(field_num, move |v| {
                 c2.borrow_mut().push((field_num, v));
                 Ok(())

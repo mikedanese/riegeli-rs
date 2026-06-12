@@ -262,9 +262,10 @@ fn verify_boundary_reference(
         .unwrap_or_else(|e| panic!("{label}: failed to open: {e:?}"));
     let mut count = 0usize;
     let mut begins: Vec<u64> = Vec::new();
-    while let Some(_) = reader
+    while reader
         .read_record()
         .unwrap_or_else(|e| panic!("{label}: read_record failed at index {count}: {e:?}"))
+        .is_some()
     {
         count += 1;
         let b = reader.last_pos().chunk_begin;

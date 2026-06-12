@@ -57,6 +57,7 @@ impl SimpleChunkEncoder {
     }
 
     /// Create a new encoder with the specified compression type.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_compression(compression: CompressionType) -> Self {
         Self {
             records: Vec::new(),
@@ -634,8 +635,7 @@ mod tests {
         payload.extend_from_slice(&bomb_compressed);
 
         let err = super::decode_compressed(&payload, 1, CompressionType::Zstd, 3)
-            .err()
-            .expect("decompression bomb must be rejected");
+            .expect_err("decompression bomb must be rejected");
         assert!(
             err.to_string().contains("exceeds its declared size")
                 || err.to_string().contains("decompress"),
@@ -651,8 +651,7 @@ mod tests {
         // varint64(u64::MAX) as sizes_blob_len, then nothing.
         let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
         let err = super::decode_compressed(&payload, 1, CompressionType::Zstd, 0)
-            .err()
-            .expect("overflowing sizes blob length must error");
+            .expect_err("overflowing sizes blob length must error");
         assert!(
             err.to_string().contains("overflows") || err.to_string().contains("truncated"),
             "unexpected error: {err}"
@@ -667,8 +666,7 @@ mod tests {
         // varint64(u64::MAX), then nothing.
         let payload: [u8; 10] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
         let err = super::decode_uncompressed(&payload, 1, 0)
-            .err()
-            .expect("overflowing sizes length must error");
+            .expect_err("overflowing sizes length must error");
         assert!(
             err.to_string().contains("overflows") || err.to_string().contains("truncated"),
             "unexpected error: {err}"
@@ -1400,7 +1398,7 @@ mod tests {
     fn test_brotli_varint_prefix_value_10_records() {
         let mut encoder = SimpleChunkEncoder::with_compression(CompressionType::Brotli);
         for _ in 0..10 {
-            encoder.add_record(&vec![0xAA; 200]);
+            encoder.add_record(&[0xAA; 200]);
         }
         let chunk = encoder.encode().expect("encode ok");
         assert_eq!(chunk.data[0], b'b');

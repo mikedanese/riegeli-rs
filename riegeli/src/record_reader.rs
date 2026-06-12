@@ -1617,8 +1617,8 @@ mod tests {
         // Make sure we're not corrupting a block header position.
         let mid = if mid % 65536 < 24 { mid + 24 } else { mid };
         if mid + 8 < data.len() {
-            for i in mid..mid + 8 {
-                data[i] ^= 0xFF;
+            for b in &mut data[mid..mid + 8] {
+                *b ^= 0xFF;
             }
         }
 
@@ -2026,7 +2026,7 @@ mod tests {
 
         // Collect record positions, then seek back to each and re-read.
         let mut positions = Vec::new();
-        while let Some(_) = reader.read_record().expect("read ok") {
+        while reader.read_record().expect("read ok").is_some() {
             positions.push(reader.last_pos());
         }
         assert_eq!(positions.len(), n);
@@ -2416,9 +2416,8 @@ mod tests {
             "keep it single-block for span math"
         );
         // Corrupt the final data byte of chunks 1..=N (leave first and last).
-        for k in 1..=N {
-            let idx = lens[k] - 1;
-            data[idx] ^= 0xFF;
+        for &len in &lens[1..=N] {
+            data[len - 1] ^= 0xFF;
         }
 
         let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
@@ -2634,7 +2633,7 @@ mod tests {
                 let mut i = 0usize;
                 while i < header.len() {
                     let pos = file.len() as u64;
-                    if pos % BLOCK_SIZE == 0 {
+                    if pos.is_multiple_of(BLOCK_SIZE) {
                         let bh = crate::block_header::BlockHeader::from_parts(
                             pos - chunk_begin,
                             chunk_end - pos,
@@ -2893,7 +2892,6 @@ mod tests {
                 self.0.borrow_mut().seek(pos)
             }
         }
-        use std::io::Read as _;
 
         let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
         let full = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));

@@ -480,7 +480,7 @@ fn adversarial_existence_only_zstd() {
     let records: Vec<Vec<u8>> = (0..20u64)
         .map(|i| {
             let mut r = encode_varint_field(1, i);
-            r.extend(encode_bytes_field(2, &vec![0xAA; 100]));
+            r.extend(encode_bytes_field(2, &[0xAA; 100]));
             r
         })
         .collect();

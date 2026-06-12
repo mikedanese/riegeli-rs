@@ -6,7 +6,7 @@
     not(all(feature = "brotli", feature = "zstd", feature = "snappy")),
     allow(unused_imports)
 )]
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{Cursor, Write};
 
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, RiegeliError, WriterOptions};
 

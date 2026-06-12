@@ -300,7 +300,7 @@ fn adv_j_read_metadata_does_not_advance_position() {
     for (i, expected) in records.iter().enumerate() {
         let got = reader
             .read_record()
-            .expect(&format!("read {i}"))
+            .unwrap_or_else(|_| panic!("read {i}"))
             .expect("got record");
         assert_eq!(
             got, *expected,

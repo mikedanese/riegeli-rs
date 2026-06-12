@@ -122,6 +122,7 @@ fn encode_u32v(v: u32) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 fn encode_varint_field(field: u32, value: u64) -> Vec<u8> {
     let mut out = encode_u32v((field << 3) | 0);
     let mut v = value;

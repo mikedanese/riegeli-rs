@@ -151,6 +151,7 @@ pub struct StaticHandlerSet;
 
 impl StaticHandlerSet {
     /// Creates a handler set with one handler.
+    #[allow(clippy::new_ret_no_self)] // entry point of the typed builder chain
     pub fn new<H1: FieldHandler>(h1: H1) -> StaticHandlerSet1<H1> {
         StaticHandlerSet1 { h1 }
     }

@@ -199,7 +199,7 @@ mod tests {
 
         while pos < file_data.len() {
             // Skip block header if at block boundary
-            if pos % BLOCK_SIZE as usize == 0 {
+            if pos.is_multiple_of(BLOCK_SIZE as usize) {
                 pos += BLOCK_HEADER_SIZE as usize;
                 if pos >= file_data.len() {
                     break;
@@ -213,7 +213,7 @@ mod tests {
             let mut ch_raw = [0u8; 40];
             let mut ch_offset = 0;
             while ch_offset < 40 {
-                if pos % BLOCK_SIZE as usize == 0 {
+                if pos.is_multiple_of(BLOCK_SIZE as usize) {
                     pos += BLOCK_HEADER_SIZE as usize;
                 }
                 let space = (BLOCK_SIZE as usize - (pos % BLOCK_SIZE as usize)).min(40 - ch_offset);
@@ -234,7 +234,7 @@ mod tests {
             let mut chunk_data = Vec::with_capacity(data_size);
             let mut remaining = data_size;
             while remaining > 0 {
-                if pos % BLOCK_SIZE as usize == 0 {
+                if pos.is_multiple_of(BLOCK_SIZE as usize) {
                     pos += BLOCK_HEADER_SIZE as usize;
                 }
                 let space = (BLOCK_SIZE as usize - (pos % BLOCK_SIZE as usize)).min(remaining);
@@ -267,7 +267,7 @@ mod tests {
         let mut pos = 64usize; // after sig chunk
 
         while pos < file_data.len() {
-            if pos % BLOCK_SIZE as usize == 0 {
+            if pos.is_multiple_of(BLOCK_SIZE as usize) {
                 pos += BLOCK_HEADER_SIZE as usize;
                 if pos >= file_data.len() {
                     break;
@@ -285,7 +285,7 @@ mod tests {
             let mut temp_pos = pos;
             let mut ch_offset = 0;
             while ch_offset < 40 {
-                if temp_pos % BLOCK_SIZE as usize == 0 {
+                if temp_pos.is_multiple_of(BLOCK_SIZE as usize) {
                     temp_pos += BLOCK_HEADER_SIZE as usize;
                 }
                 let space =
@@ -300,7 +300,7 @@ mod tests {
             }
 
             let ch = ChunkHeader::from_bytes(ch_raw);
-            let total = CHUNK_HEADER_SIZE as u64 + ch.data_size();
+            let total = CHUNK_HEADER_SIZE + ch.data_size();
             let end = add_with_overhead(chunk_start, total);
             pos = end as usize;
         }

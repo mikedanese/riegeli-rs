@@ -41,6 +41,7 @@ fn decode_u32(buf: &[u8]) -> Result<(u32, usize), String> {
 // Proto encoding helpers (duplicated to keep this file self-contained)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 fn encode_varint_field(field_number: u32, value: u64) -> Vec<u8> {
     let tag = (field_number << 3) | 0u32;
     let mut out = encode_u32(tag);

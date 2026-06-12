@@ -430,7 +430,7 @@ fn test_33_2_empty_projection_with_compression() {
     let records: Vec<Vec<u8>> = (0..20u64)
         .map(|i| {
             let mut r = encode_varint_field(1, i);
-            r.extend(encode_bytes_field(2, &vec![0xAA; 100]));
+            r.extend(encode_bytes_field(2, &[0xAA; 100]));
             r
         })
         .collect();
@@ -679,7 +679,7 @@ fn test_33_existence_only_with_brotli_compression() {
         .map(|i| {
             let mut r = encode_varint_field(1, i * 7);
             r.extend(encode_fixed64_field(2, i * 1000));
-            r.extend(encode_bytes_field(3, &vec![0xBB; 50]));
+            r.extend(encode_bytes_field(3, &[0xBB; 50]));
             r
         })
         .collect();
@@ -742,7 +742,7 @@ fn test_33_empty_projection_multiple_chunks() {
     let records: Vec<Vec<u8>> = (0..200u64)
         .map(|i| {
             let mut r = encode_varint_field(1, i);
-            r.extend(encode_bytes_field(2, &vec![0xCC; 200]));
+            r.extend(encode_bytes_field(2, &[0xCC; 200]));
             r
         })
         .collect();

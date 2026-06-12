@@ -536,6 +536,7 @@ pub struct TransposeChunkDecoder {
 
 impl TransposeChunkDecoder {
     /// Parse the transpose chunk header and decode all records.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(chunk: Chunk) -> Result<Self, RiegeliError> {
         Self::new_with_projection(chunk, None)
     }
@@ -2408,7 +2409,6 @@ mod tests {
         );
     }
 
-    use super::*;
     use crate::chunk_header::{ChunkHeader, ChunkType};
     use crate::field_projection::Field;
     use crate::proto::make_tag;
@@ -3069,11 +3069,10 @@ mod tests {
             2,
         );
 
-        let result = std::panic::catch_unwind(|| match TransposeChunkDecoder::new(chunk) {
-            Ok(mut dec) => {
+        let result = std::panic::catch_unwind(|| {
+            if let Ok(mut dec) = TransposeChunkDecoder::new(chunk) {
                 let _ = dec.read_record();
             }
-            Err(_) => {}
         });
         assert!(result.is_ok(), "corrupted bucket must not panic");
     }
@@ -3181,7 +3180,7 @@ mod tests {
         // field 2, length-delimited, 5000 bytes of 'A'.
         let mut record = vec![0x12]; // tag: field 2, length-delimited
         record.extend_from_slice(&encode_u32(5000));
-        record.extend(std::iter::repeat(0x41).take(5000));
+        record.extend(std::iter::repeat_n(0x41, 5000));
         let result = roundtrip_via_encoder(&[&record], CompressionType::None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], record, "large string field must round-trip");
@@ -3336,11 +3335,10 @@ mod tests {
     fn test_projection_with_submessages_identical_output() {
         // Encode a record with top-level field 1 = varint 42 and field 2 = varint 99.
         use crate::transpose::encoder::TransposeChunkEncoder;
-        let mut record = Vec::new();
-        record.push(0x08); // field 1, varint
-        record.push(42);
-        record.push(0x10); // field 2, varint
-        record.push(99);
+        let record = vec![
+            0x08, 42, // field 1, varint 42
+            0x10, 99, // field 2, varint 99
+        ];
 
         let mut enc = TransposeChunkEncoder::new(CompressionType::None);
         enc.add_record(&record).unwrap();

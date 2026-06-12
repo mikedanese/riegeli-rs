@@ -7,7 +7,7 @@
     allow(unused_imports)
 )]
 use riegeli::proto::{
-    FieldHandler, FieldValue, FilteredFieldIter, HandleField, ProtoField, ProtoFieldIter,
+    FieldHandler, FieldValue, FilteredFieldIter, ProtoField, ProtoFieldIter,
     SerializedMessageWriter, StaticHandlerSet, WireType, copy_fields, read_message,
 };
 

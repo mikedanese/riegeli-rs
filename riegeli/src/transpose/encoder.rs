@@ -1574,6 +1574,7 @@ fn emit_transition_bytes(
 }
 
 #[cfg(test)]
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 mod tests {
     use super::*;
     use crate::transpose::decoder::TransposeChunkDecoder;
@@ -1864,7 +1865,7 @@ mod tests {
         // should use implicit transitions, producing very few transition bytes.
         // The chunk data size should be smaller than what a trivial SM would
         // produce. We just verify the encoding is valid and compact.
-        assert!(chunk.data.len() > 0);
+        assert!(!chunk.data.is_empty());
     }
 
     // -------------------------------------------------------------------
@@ -2504,7 +2505,7 @@ mod tests {
         }
 
         let corrupted_chunk = Chunk {
-            header: chunk.header.clone(),
+            header: chunk.header,
             data: corrupted_data,
         };
         let result = TransposeChunkDecoder::new(corrupted_chunk);
@@ -2693,7 +2694,7 @@ mod tests {
         push_varint(&mut rec, u64::MAX);
         rec.push(0x10);
         push_varint(&mut rec, u64::MAX);
-        let records = vec![rec];
+        let records = [rec];
         let result = roundtrip(&[records[0].as_slice()], CompressionType::None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], records[0]);
@@ -2714,7 +2715,7 @@ mod tests {
             let mut corrupted = chunk.data.clone();
             corrupted.truncate(truncate_at);
             let corrupted_chunk = Chunk {
-                header: chunk.header.clone(),
+                header: chunk.header,
                 data: corrupted,
             };
             let result = TransposeChunkDecoder::new(corrupted_chunk);

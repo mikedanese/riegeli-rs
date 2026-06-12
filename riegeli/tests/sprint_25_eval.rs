@@ -146,8 +146,8 @@ fn adv_partial_iteration_valid_fields_then_error() {
 
     let results: Vec<_> = ProtoFieldIter::new(&data).collect();
     assert_eq!(results.len(), 4); // 3 Ok + 1 Err
-    for i in 0..3 {
-        assert!(results[i].is_ok());
+    for r in &results[..3] {
+        assert!(r.is_ok());
     }
     assert!(results[3].is_err());
 }
