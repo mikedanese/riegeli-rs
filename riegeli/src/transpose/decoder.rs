@@ -887,6 +887,12 @@ impl TransposeChunkDecoder {
     /// that contains buffer `buffer_i`. The mapping is derived by summing
     /// buffer uncompressed sizes and comparing against bucket decompressed
     /// sizes.
+    ///
+    /// Mirrors the accounting of C++ `ParseBuffers` /
+    /// `ParseBuffersForFiltering`: each buffer is assigned to the *current*
+    /// bucket (advancing to the next bucket only after the current one is
+    /// exhausted), every bucket must be consumed exactly, and trailing
+    /// non-empty buckets are an error.
     fn compute_buffer_to_bucket(
         bucket_compressed_data: &[Vec<u8>],
         buffer_uncompressed_sizes: &[usize],
@@ -896,7 +902,11 @@ impl TransposeChunkDecoder {
         let num_buffers = buffer_uncompressed_sizes.len();
         let mut buffer_to_bucket = Vec::with_capacity(num_buffers);
 
-        if num_buckets == 0 || num_buffers == 0 {
+        if num_buckets == 0 {
+            // C++: with no buckets there must be no buffers ("Too few buckets").
+            if num_buffers != 0 {
+                return Err(RiegeliError::MalformedData("too few buckets".into()));
+            }
             return Ok(buffer_to_bucket);
         }
 
@@ -913,11 +923,9 @@ impl TransposeChunkDecoder {
         let mut bucket_remaining: usize = bucket_decompressed_sizes[0];
 
         for (i, &buf_size) in buffer_uncompressed_sizes.iter().enumerate() {
-            // Advance to next bucket if current one is exhausted.
-            while bucket_remaining == 0 && bucket_index + 1 < num_buckets {
-                bucket_index += 1;
-                bucket_remaining = bucket_decompressed_sizes[bucket_index];
-            }
+            // Assign to the current bucket first (C++ advances only after a
+            // buffer has been read), so an empty leading bucket followed by
+            // a non-empty buffer is an error rather than being skipped.
             if buf_size > bucket_remaining {
                 return Err(RiegeliError::MalformedData(
                     format!(
@@ -929,6 +937,22 @@ impl TransposeChunkDecoder {
             }
             buffer_to_bucket.push(bucket_index);
             bucket_remaining -= buf_size;
+            // Advance past exhausted buckets.
+            while bucket_remaining == 0 && bucket_index + 1 < num_buckets {
+                bucket_index += 1;
+                bucket_remaining = bucket_decompressed_sizes[bucket_index];
+            }
+        }
+
+        // C++: all buckets must be reached ("Too few buckets") and the last
+        // bucket must be consumed exactly ("End of data expected").
+        if bucket_index + 1 < num_buckets {
+            return Err(RiegeliError::MalformedData("too few buckets".into()));
+        }
+        if bucket_remaining > 0 {
+            return Err(RiegeliError::MalformedData(
+                "end of bucket data expected".into(),
+            ));
         }
 
         Ok(buffer_to_bucket)
@@ -950,25 +974,23 @@ impl TransposeChunkDecoder {
         let num_buckets = bucket_compressed_data.len();
         let num_buffers = buffer_uncompressed_sizes.len();
 
-        if num_buffers == 0 {
-            return Ok(Vec::new());
-        }
-        // Buffers live inside buckets; claiming buffers with no buckets is
-        // malformed. Returning an empty buffer set here instead would let
-        // nodes whose buffer_index was validated against num_buffers index
-        // out of bounds at decode time (found by fuzzing).
-        if num_buckets == 0 {
-            return Err(RiegeliError::MalformedData(
-                "transpose chunk claims buffers but no buckets".into(),
-            ));
-        }
+        // Step 1: Compute which buffer belongs to which bucket. This also
+        // validates the bucket/buffer accounting (buffers fitting buckets,
+        // exact bucket consumption, no unused trailing buckets), so it must
+        // run even when there are no buffers. In particular, claiming
+        // buffers with no buckets is rejected there ("too few buckets"),
+        // which keeps node buffer_index values validated against
+        // num_buffers from indexing out of bounds at decode time.
 
-        // Step 1: Compute which buffer belongs to which bucket.
         let buffer_to_bucket = Self::compute_buffer_to_bucket(
             bucket_compressed_data,
             buffer_uncompressed_sizes,
             compression_type,
         )?;
+
+        if num_buffers == 0 {
+            return Ok(Vec::new());
+        }
 
         // Step 2: Determine which buckets need decompression.
         let mut bucket_needed = vec![false; num_buckets];
@@ -983,6 +1005,21 @@ impl TransposeChunkDecoder {
         for (bi, compressed) in bucket_compressed_data.iter().enumerate() {
             if bucket_needed[bi] {
                 let decompressed = decompress_with_prefix(compressed, compression_type)?;
+                // The claimed decompressed size was used for the
+                // buffer-to-bucket accounting above; the actual decompressed
+                // stream must match it exactly (C++ VerifyEndAndClose).
+                let claimed = Self::bucket_decompressed_size(compressed, compression_type)?;
+                if decompressed.len() != claimed {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "bucket {} decompressed to {} bytes, expected {}",
+                            bi,
+                            decompressed.len(),
+                            claimed
+                        )
+                        .into(),
+                    ));
+                }
                 bucket_decompressed.push(Some(decompressed));
             } else {
                 bucket_decompressed.push(None);
@@ -2294,7 +2331,7 @@ mod tests {
             },
         };
         assert!(
-            err.to_string().contains("buffers but no buckets"),
+            err.to_string().contains("too few buckets"),
             "unexpected error: {err}"
         );
     }
@@ -2441,6 +2478,7 @@ mod tests {
     use crate::varint::encode_u64;
 
     /// Helper to build a transpose chunk from hand-crafted state machine.
+    /// All buffers are placed into a single exactly-sized bucket.
     fn build_transpose_chunk(
         compression: CompressionType,
         num_records: u64,
@@ -2450,21 +2488,57 @@ mod tests {
         transitions: &[u8],
         first_node: u32,
     ) -> Chunk {
+        let total_buf_size: u64 = buffers_data.iter().map(|b| b.len() as u64).sum();
+        let bucket_sizes: Vec<u64> = if buffers_data.is_empty() {
+            Vec::new()
+        } else {
+            vec![total_buf_size]
+        };
+        let buffer_sizes: Vec<u64> = buffers_data.iter().map(|b| b.len() as u64).collect();
+        let bucket_bytes: Vec<u8> = buffers_data.concat();
+        build_transpose_chunk_with_buckets(
+            compression,
+            num_records,
+            decoded_data_size,
+            states,
+            &bucket_sizes,
+            &buffer_sizes,
+            &bucket_bytes,
+            transitions,
+            first_node,
+            &[],
+        )
+    }
+
+    /// Helper to build a transpose chunk with explicit bucket layout.
+    ///
+    /// `bucket_sizes` are the claimed per-bucket byte counts, `buffer_sizes`
+    /// the claimed per-buffer byte counts, and `bucket_bytes` the raw bucket
+    /// section bytes. `header_suffix` is appended to the header after
+    /// `first_node` (normally empty).
+    #[allow(clippy::too_many_arguments)]
+    fn build_transpose_chunk_with_buckets(
+        compression: CompressionType,
+        num_records: u64,
+        decoded_data_size: u64,
+        states: &[TestState],
+        bucket_sizes: &[u64],
+        buffer_sizes: &[u64],
+        bucket_bytes: &[u8],
+        transitions: &[u8],
+        first_node: u32,
+        header_suffix: &[u8],
+    ) -> Chunk {
         let mut header_bytes: Vec<u8> = Vec::new();
 
-        let num_buckets: u32 = if buffers_data.is_empty() { 0 } else { 1 };
-        let num_buffers = buffers_data.len() as u32;
-        header_bytes.extend_from_slice(&encode_u32(num_buckets));
-        header_bytes.extend_from_slice(&encode_u32(num_buffers));
+        header_bytes.extend_from_slice(&encode_u32(bucket_sizes.len() as u32));
+        header_bytes.extend_from_slice(&encode_u32(buffer_sizes.len() as u32));
 
-        // Bucket compressed size = total buffer sizes.
-        let total_buf_size: usize = buffers_data.iter().map(|b| b.len()).sum();
-        if num_buckets > 0 {
-            header_bytes.extend_from_slice(&encode_u64(total_buf_size as u64));
+        for &size in bucket_sizes {
+            header_bytes.extend_from_slice(&encode_u64(size));
         }
-
-        for buf in buffers_data {
-            header_bytes.extend_from_slice(&encode_u64(buf.len() as u64));
+        for &size in buffer_sizes {
+            header_bytes.extend_from_slice(&encode_u64(size));
         }
 
         let num_states = states.len() as u32;
@@ -2510,14 +2584,13 @@ mod tests {
         }
 
         header_bytes.extend_from_slice(&encode_u32(first_node));
+        header_bytes.extend_from_slice(header_suffix);
 
         let mut chunk_data: Vec<u8> = Vec::new();
         chunk_data.push(compression as u8);
         chunk_data.extend_from_slice(&encode_u64(header_bytes.len() as u64));
         chunk_data.extend_from_slice(&header_bytes);
-        for buf in buffers_data {
-            chunk_data.extend_from_slice(buf);
-        }
+        chunk_data.extend_from_slice(bucket_bytes);
         chunk_data.extend_from_slice(transitions);
 
         let chunk_header = ChunkHeader::from_parts(
@@ -2905,6 +2978,92 @@ mod tests {
             rec, expected,
             "non-canonical string length varint must be preserved verbatim"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Bucket/buffer accounting (C++ ParseBuffers / ParseBuffersForFiltering)
+    // -------------------------------------------------------------------
+
+    /// A nonproto chunk for the bucket-accounting tests: one record "hello"
+    /// with data buffer (5 bytes) and lengths buffer (1 byte).
+    fn nonproto_chunk_with_buckets(bucket_sizes: &[u64], bucket_bytes: &[u8]) -> Chunk {
+        let states = vec![TestState::new(message_id::NON_PROTO, 0, 0, 0)];
+        build_transpose_chunk_with_buckets(
+            CompressionType::None,
+            1,
+            5,
+            &states,
+            bucket_sizes,
+            &[5, 1],
+            bucket_bytes,
+            &[],
+            0,
+            &[],
+        )
+    }
+
+    #[test]
+    fn test_trailing_unused_bucket_rejected() {
+        // All buffers fit in bucket 0; buckets 1 and 2 are never reached.
+        // C++ fails with "Too few buckets".
+        let mut bucket_bytes = b"hello".to_vec();
+        bucket_bytes.extend_from_slice(&encode_u32(5)); // lengths buffer
+        bucket_bytes.push(0xAA); // bucket 1
+        bucket_bytes.push(0xBB); // bucket 2
+        let chunk = nonproto_chunk_with_buckets(&[6, 1, 1], &bucket_bytes);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "unused trailing buckets must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_leftover_bucket_bytes_rejected() {
+        // The single bucket claims 7 bytes but the buffers only consume 6.
+        // C++ fails VerifyEndAndClose / "End of data expected".
+        let mut bucket_bytes = b"hello".to_vec();
+        bucket_bytes.extend_from_slice(&encode_u32(5)); // lengths buffer
+        bucket_bytes.push(0xAA); // leftover byte in the bucket
+        let chunk = nonproto_chunk_with_buckets(&[7], &bucket_bytes);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "leftover undecoded bucket bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_empty_first_bucket_rejected() {
+        // Bucket 0 is empty and buffer 0 is non-empty. C++ assigns each
+        // buffer to the current bucket before advancing, so it fails
+        // ("Buffer does not fit in bucket" / "Reading buffer failed").
+        let mut bucket_bytes = b"hello".to_vec();
+        bucket_bytes.extend_from_slice(&encode_u32(5)); // lengths buffer
+        let chunk = nonproto_chunk_with_buckets(&[0, 6], &bucket_bytes);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "a non-empty buffer must not skip over an empty leading bucket"
+        );
+    }
+
+    #[test]
+    fn test_zero_buckets_with_buffers_rejected() {
+        // num_buckets == 0 with num_buffers != 0: C++ fails "Too few buckets".
+        let chunk = nonproto_chunk_with_buckets(&[], &[]);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "buffers without any bucket must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_exact_multi_bucket_layout_accepted() {
+        // Two buckets consumed exactly: bucket 0 holds the data buffer,
+        // bucket 1 the lengths buffer. Both C++ and Rust accept this.
+        let mut bucket_bytes = b"hello".to_vec();
+        bucket_bytes.extend_from_slice(&encode_u32(5));
+        let chunk = nonproto_chunk_with_buckets(&[5, 1], &bucket_bytes);
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("exact layout decodes");
+        assert_eq!(dec.read_record().unwrap().unwrap(), b"hello");
     }
 
     // -------------------------------------------------------------------
