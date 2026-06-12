@@ -169,8 +169,9 @@ impl StateInfo {
 }
 
 /// Entry in the priority queue used during state machine construction.
-/// Ordered by num_transitions descending, then dest_index ascending for
-/// reproducibility.
+/// Popped in order of ascending `num_transitions` (ties broken by descending
+/// `dest_index` for reproducibility), matching the C++ comparator under
+/// `std::priority_queue`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PriorityQueueEntry {
     dest_index: u32,
@@ -178,16 +179,17 @@ struct PriorityQueueEntry {
 }
 
 impl Ord for PriorityQueueEntry {
-    /// Order by descending `num_transitions`, breaking ties by ascending
-    /// `dest_index` for reproducibility. Reversed for `BinaryHeap` (max-heap).
+    /// Replicates the C++ comparator: `a < b` iff `a.num_transitions >
+    /// b.num_transitions`, ties broken by ascending `dest_index`. Both
+    /// `std::priority_queue` and `BinaryHeap` are max-heaps, so they pop the
+    /// entry with the fewest transitions first. The state machine is written
+    /// back-to-front, which places the most frequent destinations at the
+    /// lowest state indices (reachable without NoOp hops).
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Largest num_transitions first.
         other
             .num_transitions
             .cmp(&self.num_transitions)
             .then_with(|| self.dest_index.cmp(&other.dest_index))
-            // BinaryHeap is a max-heap, so we reverse the comparison.
-            .reverse()
     }
 }
 
@@ -1601,6 +1603,45 @@ mod tests {
             out.push(rec);
         }
         out
+    }
+
+    // -------------------------------------------------------------------
+    // Priority queue ordering must match the C++ reference.
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_priority_queue_pop_order_matches_cpp() {
+        // In the C++ reference, `std::priority_queue` (a max-heap) with the
+        // PriorityQueueEntry comparator pops the entry with the FEWEST
+        // transitions first, breaking ties by LARGEST dest_index. Combined
+        // with the back-to-front state writing in CreateStateMachine, this
+        // places the most frequent destinations at the lowest state-machine
+        // indices. BinaryHeap must pop in the same order.
+        let mut heap: BinaryHeap<PriorityQueueEntry> = BinaryHeap::new();
+        heap.push(PriorityQueueEntry {
+            dest_index: 1,
+            num_transitions: 5,
+        });
+        heap.push(PriorityQueueEntry {
+            dest_index: 2,
+            num_transitions: 1,
+        });
+        heap.push(PriorityQueueEntry {
+            dest_index: 3,
+            num_transitions: 9,
+        });
+        heap.push(PriorityQueueEntry {
+            dest_index: 4,
+            num_transitions: 5,
+        });
+
+        let order: Vec<u32> = std::iter::from_fn(|| heap.pop())
+            .map(|e| e.dest_index)
+            .collect();
+        assert_eq!(
+            order,
+            vec![2, 4, 1, 3],
+            "pop order must be ascending num_transitions, ties by descending dest_index"
+        );
     }
 
     // -------------------------------------------------------------------
