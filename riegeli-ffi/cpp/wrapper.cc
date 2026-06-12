@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -115,7 +116,8 @@ size_t writer_output_len(const StringRecordWriter& writer) {
 
 void writer_copy_output(const StringRecordWriter& writer,
                         rust::Slice<uint8_t> dest) {
-  std::memcpy(dest.data(), writer.output.data(), dest.size());
+  const size_t n = std::min(dest.size(), writer.output.size());
+  if (n > 0) std::memcpy(dest.data(), writer.output.data(), n);
 }
 
 bool writer_ok(const StringRecordWriter& writer) { return writer.is_ok; }
@@ -194,15 +196,18 @@ size_t reader_skipped_count(const StringRecordReader& reader) {
 }
 
 uint64_t reader_skipped_begin(const StringRecordReader& reader, size_t i) {
+  if (!reader.skipped || i >= reader.skipped->size()) return 0;
   return (*reader.skipped)[i].begin();
 }
 
 uint64_t reader_skipped_end(const StringRecordReader& reader, size_t i) {
+  if (!reader.skipped || i >= reader.skipped->size()) return 0;
   return (*reader.skipped)[i].end();
 }
 
 rust::String reader_skipped_message(const StringRecordReader& reader,
                                     size_t i) {
+  if (!reader.skipped || i >= reader.skipped->size()) return rust::String();
   return rust::String(std::string((*reader.skipped)[i].message()));
 }
 

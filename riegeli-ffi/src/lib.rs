@@ -413,6 +413,46 @@ mod tests {
     }
 
     #[test]
+    fn writer_copy_output_clamps_to_output_len() {
+        let mut inner = ffi::new_record_writer(ffi::new_writer_options());
+        assert!(ffi::writer_write_record(inner.pin_mut(), b"hello"));
+        assert!(ffi::writer_close(inner.pin_mut()));
+        let len = ffi::writer_output_len(&inner);
+        assert!(len > 0);
+
+        // An oversized destination must not read past the end of the C++
+        // output buffer: only the first `len` bytes may be written, and the
+        // tail of the destination must be left untouched.
+        let mut buf = vec![0xABu8; len + 64];
+        ffi::writer_copy_output(&inner, &mut buf);
+        assert!(buf[..len].iter().any(|&b| b != 0xAB));
+        assert!(buf[len..].iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn skipped_accessors_are_safe_without_recovery_and_out_of_range() {
+        let mut writer = RecordWriter::new(WriterOptions::new()).unwrap();
+        writer.write_record(b"record").unwrap();
+        let data = writer.close().unwrap();
+
+        // Reader created without collect_recovery has no skipped vector;
+        // the accessors must not dereference it.
+        let reader = RecordReader::new(&data).unwrap();
+        assert_eq!(ffi::reader_skipped_count(&reader.inner), 0);
+        assert_eq!(ffi::reader_skipped_begin(&reader.inner, 0), 0);
+        assert_eq!(ffi::reader_skipped_end(&reader.inner, 0), 0);
+        assert_eq!(ffi::reader_skipped_message(&reader.inner, 0), "");
+
+        // With recovery enabled but nothing skipped, out-of-range indices
+        // must not read past the end of the vector.
+        let reader = RecordReader::with_options(&data, &[], true, None).unwrap();
+        assert_eq!(ffi::reader_skipped_count(&reader.inner), 0);
+        assert_eq!(ffi::reader_skipped_begin(&reader.inner, 5), 0);
+        assert_eq!(ffi::reader_skipped_end(&reader.inner, 5), 0);
+        assert_eq!(ffi::reader_skipped_message(&reader.inner, 5), "");
+    }
+
+    #[test]
     fn metadata_absent() {
         let mut writer = RecordWriter::new(WriterOptions::new()).unwrap();
         writer.write_record(b"record").unwrap();
