@@ -1393,6 +1393,9 @@ impl TransposeChunkEncoder {
     ) -> Result<(), RiegeliError> {
         let mut pos = 0usize;
         let mut message_stack: Vec<MessageFrame> = Vec::new();
+        // Parent message ids of currently open proto groups; restored on
+        // EndGroup (matching the C++ group_stack_).
+        let mut group_stack: Vec<u32> = Vec::new();
         let mut current_parent = parent_message_id;
         let mut current_end = data.len();
 
@@ -1432,7 +1435,7 @@ impl TransposeChunkEncoder {
                         node_id,
                         node_mid,
                         current_end,
-                        depth,
+                        depth + group_stack.len(),
                         &message_stack,
                         &mut current_parent,
                         &mut current_end,
@@ -1445,10 +1448,21 @@ impl TransposeChunkEncoder {
                 Some(WireType::StartGroup) => {
                     let idx = self.get_pos_in_tags_list(node_id, subtype::TRIVIAL);
                     self.encoded_tags.push(idx);
+                    // Fields inside the group are attributed to the group's
+                    // message node, like a submessage scope.
+                    group_stack.push(current_parent);
+                    current_parent = node_mid;
                 }
                 Some(WireType::EndGroup) => {
+                    // Note: `node_id` was looked up under the group's message
+                    // id (the parent in effect inside the group), matching
+                    // the C++ reference which resolves the node before
+                    // restoring the parent.
                     let idx = self.get_pos_in_tags_list(node_id, subtype::TRIVIAL);
                     self.encoded_tags.push(idx);
+                    current_parent = group_stack.pop().ok_or_else(|| {
+                        RiegeliError::MalformedData("unmatched end-group tag".into())
+                    })?;
                 }
                 None => {
                     return Err(RiegeliError::MalformedData(
@@ -1577,6 +1591,9 @@ impl TransposeChunkEncoder {
             ));
         }
 
+        // `depth` includes the number of currently open groups, matching the
+        // C++ check `message_stack_.size() + group_stack_.size() <
+        // kMaxRecursionDepth`.
         let total_depth = depth + message_stack.len();
         if length > 0
             && total_depth < MAX_RECURSION_DEPTH
@@ -1824,6 +1841,109 @@ mod tests {
         let (num_buckets, sizes) = parse_bucket_info(&chunk);
         assert_eq!(num_buckets, 1, "tail-merge must fold the remainder");
         assert_eq!(sizes, vec![11]);
+    }
+
+    // -------------------------------------------------------------------
+    // Proto groups must get their own message scope (C++ group_stack_).
+    // -------------------------------------------------------------------
+
+    /// StartGroup field 1 = (1 << 3) | 3 = 0x0B; EndGroup field 1 = 0x0C.
+    /// Field 2 varint = 0x10.
+    const GROUP_RECORD: [u8; 8] = [0x0B, 0x10, 0xAC, 0x02, 0x0C, 0x10, 0xAC, 0x02];
+
+    #[test]
+    fn test_group_fields_get_their_own_scope() {
+        // In the C++ reference, StartGroup pushes the current parent onto
+        // group_stack_ and switches parent_message_id to the group's node,
+        // so a field inside a group and the same field number outside it map
+        // to DISTINCT NodeIds (distinct buffers and state machine entries).
+        //
+        // Record: group field 1 { field 2 varint 300 }, then field 2
+        // varint 300 at top level.
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None);
+        enc.add_record(&GROUP_RECORD).unwrap();
+
+        let varint_buffers = &enc.data.inner[BufferType::Varint as usize];
+        assert_eq!(
+            varint_buffers.len(),
+            2,
+            "field 2 inside the group and at top level must use distinct buffers"
+        );
+
+        // The group's node is created under the root; the inner field's
+        // parent must be the group's message id, not the root.
+        let group_node_id = NodeId {
+            parent_message_id: message_id::ROOT,
+            tag: 0x0B,
+        };
+        let group_mid = enc.message_nodes.get(&group_node_id).unwrap().message_id;
+        let parents: Vec<u32> = varint_buffers
+            .iter()
+            .map(|b| b.node_id.parent_message_id)
+            .collect();
+        assert!(parents.contains(&group_mid));
+        assert!(parents.contains(&message_id::ROOT));
+
+        // The EndGroup node is keyed under the group's message id (the C++
+        // reference looks up the node before restoring the parent).
+        let end_group_node = NodeId {
+            parent_message_id: group_mid,
+            tag: 0x0C,
+        };
+        assert!(enc.message_nodes.contains_key(&end_group_node));
+    }
+
+    #[test]
+    fn test_group_nesting_counts_toward_recursion_depth() {
+        // The C++ reference checks
+        // `message_stack_.size() + group_stack_.size() < kMaxRecursionDepth`
+        // before decomposing a length-delimited submessage. A submessage
+        // wrapped in MAX_RECURSION_DEPTH open groups must therefore be
+        // stored as an opaque string, not decomposed.
+        let mut record: Vec<u8> = Vec::new();
+        for _ in 0..MAX_RECURSION_DEPTH {
+            record.push(0x0B); // StartGroup field 1
+        }
+        // field 2 submessage { field 1 varint 1 }
+        record.extend_from_slice(&[0x12, 0x02, 0x08, 0x01]);
+        for _ in 0..MAX_RECURSION_DEPTH {
+            record.push(0x0C); // EndGroup field 1
+        }
+        assert!(is_proto_message(&record));
+
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None);
+        enc.add_record(&record).unwrap();
+
+        assert_eq!(
+            enc.data.inner[BufferType::String as usize].len(),
+            1,
+            "submessage nested under MAX_RECURSION_DEPTH groups must be stored as a string"
+        );
+    }
+
+    #[test]
+    fn test_group_roundtrip() {
+        let result = roundtrip(&[&GROUP_RECORD], CompressionType::None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], GROUP_RECORD);
+    }
+
+    #[test]
+    fn test_nested_group_roundtrip() {
+        // group 1 { group 3 { field 2 varint 300 } field 2 varint 5 }
+        let record: Vec<u8> = vec![
+            0x0B, // StartGroup field 1
+            0x1B, // StartGroup field 3
+            0x10, 0xAC, 0x02, // field 2 varint 300
+            0x1C, // EndGroup field 3
+            0x10, 0x05, // field 2 varint 5
+            0x0C, // EndGroup field 1
+        ];
+        assert!(is_proto_message(&record));
+        let result = roundtrip(&[&record, &record], CompressionType::None);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], record);
+        assert_eq!(result[1], record);
     }
 
     // -------------------------------------------------------------------
