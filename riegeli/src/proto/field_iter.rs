@@ -154,17 +154,27 @@ impl<'a> Iterator for ProtoFieldIter<'a> {
                 Some((length, consumed)) => {
                     self.pos += consumed;
                     let length = length as usize;
-                    if self.pos + length > self.data.len() {
-                        self.errored = true;
-                        return Some(Err(crate::RiegeliError::MalformedData(format!(
-                            "length-delimited field at offset {} declares length {} but only {} bytes remain",
-                            self.pos - consumed,
-                            length,
-                            self.data.len() - self.pos
-                        ).into())));
-                    }
-                    let slice = &self.data[self.pos..self.pos + length];
-                    self.pos += length;
+                    // Checked add: `length` is attacker-controlled (up to
+                    // u32::MAX); on a 32-bit target a wrapping add would let
+                    // the truncation check pass and the slice below panic.
+                    let end = self
+                        .pos
+                        .checked_add(length)
+                        .filter(|&end| end <= self.data.len());
+                    let end = match end {
+                        Some(end) => end,
+                        None => {
+                            self.errored = true;
+                            return Some(Err(crate::RiegeliError::MalformedData(format!(
+                                "length-delimited field at offset {} declares length {} but only {} bytes remain",
+                                self.pos - consumed,
+                                length,
+                                self.data.len() - self.pos
+                            ).into())));
+                        }
+                    };
+                    let slice = &self.data[self.pos..end];
+                    self.pos = end;
                     FieldValue::LengthDelimited(slice)
                 }
                 None => {
@@ -573,5 +583,21 @@ mod tests {
         let cloned = fields[0].clone();
         assert_eq!(fields[0], cloned);
         let _ = format!("{:?}", fields[0]);
+    }
+
+    #[test]
+    fn length_delimited_huge_length_returns_err() {
+        // Field 1 varint 1, then field 2 length-delimited declaring length
+        // u32::MAX with no payload. The bounds check must not compute
+        // `pos + length` with an unchecked add: on a 32-bit target that sum
+        // wraps, the truncation check passes, and the slice panics. The
+        // iterator must return Err, never panic, on corrupt input.
+        let data: &[u8] = &[0x08, 0x01, 0x12, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        let mut iter = ProtoFieldIter::new(data);
+        let first = iter.next().expect("first field present");
+        assert!(first.is_ok());
+        let second = iter.next().expect("second field present");
+        assert!(second.is_err(), "oversized length must yield Err");
+        assert!(iter.next().is_none());
     }
 }
