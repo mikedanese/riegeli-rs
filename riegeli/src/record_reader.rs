@@ -522,7 +522,17 @@ impl<R: Read + Seek> RecordReader<R> {
 
         // Read the chunk data. The metadata chunk header is at offset 64, far
         // from any block boundary, so its data always begins at 64 + 40.
-        let data = self.read_chunk_data(metadata_chunk_pos + CHUNK_HEADER_SIZE, ch.data_size())?;
+        let metadata_chunk_end = crate::block_arithmetic::chunk_end(
+            metadata_chunk_pos,
+            ch.data_size(),
+            ch.num_records(),
+        );
+        let data = self.read_chunk_data(
+            metadata_chunk_pos,
+            metadata_chunk_end,
+            metadata_chunk_pos + CHUNK_HEADER_SIZE,
+            ch.data_size(),
+        )?;
 
         // Validate data hash.
         if !ch.is_data_valid(&data) {
@@ -923,9 +933,10 @@ impl<R: Read + Seek> RecordReader<R> {
 
             let data_size = ch.data_size();
             let num_records = ch.num_records();
+            let chunk_end = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
 
             // Read the raw chunk data (without decompressing) and validate data hash.
-            let chunk_data = self.read_chunk_data(data_begin, data_size)?;
+            let chunk_data = self.read_chunk_data(chunk_begin, chunk_end, data_begin, data_size)?;
             if !ch.is_data_valid(&chunk_data) {
                 return Err(RiegeliError::MalformedData(
                     format!("chunk data hash mismatch at offset {chunk_begin}").into(),
@@ -933,7 +944,7 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             // Advance past this chunk.
-            scan_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
+            scan_pos = chunk_end;
         }
 
         Ok(())
@@ -1157,7 +1168,8 @@ impl<R: Read + Seek> RecordReader<R> {
                 crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
 
             // Read the chunk data (skipping block headers).
-            let chunk_data = self.read_chunk_data(data_begin, data_size)?;
+            let chunk_data =
+                self.read_chunk_data(chunk_begin, data_file_end, data_begin, data_size)?;
 
             // Past this point the header is hash-valid, its claims are
             // stream-bounded, and the data bytes were physically present:
@@ -1290,6 +1302,10 @@ impl<R: Read + Seek> RecordReader<R> {
         // Riegeli/records file"). Mapping the partial case to EOF made a
         // file cut off mid-header read back as a complete, shorter file.
         let mut consumed_any = false;
+        // A block header read strictly INSIDE the 40-byte header span (the
+        // straddle case), kept for the next_chunk cross-check once the
+        // chunk header's own claims are hash-validated below.
+        let mut interior_block_header: Option<(u64, BlockHeader)> = None;
 
         while filled < bytes.len() {
             if is_block_boundary(file_pos) {
@@ -1312,6 +1328,21 @@ impl<R: Read + Seek> RecordReader<R> {
                     return Err(RiegeliError::MalformedData(
                         format!("invalid block header hash at file position {file_pos}").into(),
                     ));
+                }
+                // Cross-validate against the chunk layout (C++
+                // ReadChunkHeader): the block header's previous_chunk must
+                // point back exactly to this chunk's beginning.
+                if file_pos.checked_sub(bh.previous_chunk()) != Some(chunk_begin) {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "chunk boundary is {chunk_begin} but block header at {file_pos} \
+                             implies a different previous chunk boundary"
+                        )
+                        .into(),
+                    ));
+                }
+                if filled > 0 {
+                    interior_block_header = Some((file_pos, bh));
                 }
                 consumed_any = true;
                 file_pos += BLOCK_HEADER_SIZE;
@@ -1370,6 +1401,28 @@ impl<R: Read + Seek> RecordReader<R> {
                     ).into()));
                 }
             }
+            // The chunk header straddled a block boundary: both headers
+            // have been read, so verify they agree (C++ ReadChunkHeader):
+            // the block header's next_chunk must point exactly to this
+            // chunk's end. Only meaningful once the chunk header is
+            // hash-valid and its claims are stream-bounded (chunk_end does
+            // arithmetic on the claims).
+            if let Some((block_begin, bh)) = interior_block_header {
+                let chunk_end = crate::block_arithmetic::chunk_end(
+                    chunk_begin,
+                    ch.data_size(),
+                    ch.num_records(),
+                );
+                if block_begin.checked_add(bh.next_chunk()) != Some(chunk_end) {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "chunk boundary is {chunk_end} but block header at {block_begin} \
+                             implies a different next chunk boundary"
+                        )
+                        .into(),
+                    ));
+                }
+            }
         }
 
         Ok(Some((ch, chunk_begin, file_pos)))
@@ -1380,8 +1433,15 @@ impl<R: Read + Seek> RecordReader<R> {
     /// position of the first data byte (as returned by
     /// `read_chunk_header_at`), which is not `chunk_begin + 40` when the
     /// chunk header straddles a block boundary.
+    ///
+    /// `chunk_begin` and `chunk_end` describe the chunk being read; every
+    /// block header encountered inside the data is cross-validated against
+    /// them (C++ ReadChunk): previous_chunk must point back to
+    /// `chunk_begin` and next_chunk forward to `chunk_end`.
     fn read_chunk_data(
         &mut self,
+        chunk_begin: u64,
+        chunk_end: u64,
         data_begin: u64,
         data_size: u64,
     ) -> Result<Vec<u8>, RiegeliError> {
@@ -1408,6 +1468,28 @@ impl<R: Read + Seek> RecordReader<R> {
                         format!(
                         "invalid block header hash at file position {file_pos} (during data read)"
                     )
+                        .into(),
+                    ));
+                }
+                // Cross-validate against the chunk layout (C++ ReadChunk):
+                // the block header must agree about where this chunk begins
+                // and ends, or the walk has desynchronized from the
+                // writer's actual layout.
+                if file_pos.checked_sub(bh.previous_chunk()) != Some(chunk_begin) {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "chunk boundary is {chunk_begin} but block header at {file_pos} \
+                             implies a different previous chunk boundary"
+                        )
+                        .into(),
+                    ));
+                }
+                if file_pos.checked_add(bh.next_chunk()) != Some(chunk_end) {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "chunk boundary is {chunk_end} but block header at {file_pos} \
+                             implies a different next chunk boundary"
+                        )
                         .into(),
                     ));
                 }
@@ -1452,13 +1534,15 @@ impl<R: Read + Seek> RecordReader<R> {
             }
 
             let data_size = ch.data_size();
-            let chunk_data = self.read_chunk_data(data_begin, data_size)?;
 
             // Advance only on success: if decoder construction below fails, the
             // position stays at this chunk so the error is persistent on retry
             // (same convention as load_next_chunk).
             let chunk_end_pos =
                 crate::block_arithmetic::chunk_end(chunk_begin, data_size, ch.num_records());
+
+            let chunk_data =
+                self.read_chunk_data(chunk_begin, chunk_end_pos, data_begin, data_size)?;
 
             // Header valid, claims bounded, data present: trustworthy extent
             // for any failure from here on (see load_next_chunk).
@@ -2217,6 +2301,52 @@ mod tests {
                 .expect("read after seek ok")
                 .unwrap_or_else(|| panic!("record {i} missing after seek"));
             assert_eq!(rec[0], (i % 251) as u8, "record {i} content after seek");
+        }
+    }
+
+    /// Block headers carry previous_chunk/next_chunk pointers that the C++
+    /// reader cross-validates against the actual chunk layout whenever a
+    /// chunk spans a block boundary ("block header ... implies a different
+    /// previous/next chunk boundary"). Hash-valid but layout-inconsistent
+    /// pointers (a spliced file, a buggy writer) must be rejected like the
+    /// reference does — only checking the hash let the reader keep parsing
+    /// from a desynchronized position.
+    #[test]
+    fn inconsistent_block_header_pointers_are_rejected() {
+        let n = 6;
+        let data = write_chunks_past_first_block(16320, n);
+        let b = BLOCK_SIZE as usize;
+        assert!(data.len() > b + 24, "file must span the first boundary");
+        let prev = u64::from_le_bytes(data[b + 8..b + 16].try_into().unwrap());
+        let next = u64::from_le_bytes(data[b + 16..b + 24].try_into().unwrap());
+
+        let read_all = |data: Vec<u8>| -> Result<usize, RiegeliError> {
+            let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new())?;
+            let mut count = 0;
+            while reader.read_record()?.is_some() {
+                count += 1;
+            }
+            Ok(count)
+        };
+
+        // Sanity: the untampered file reads fully.
+        assert_eq!(read_all(data.clone()).expect("clean file reads"), n);
+
+        // Tamper each pointer; from_parts recomputes the hash, so only the
+        // layout cross-check can catch the inconsistency.
+        for (label, bad_prev, bad_next) in [
+            ("next_chunk", prev, next + 17),
+            ("previous_chunk", prev + 17, next),
+        ] {
+            let mut bad = data.clone();
+            bad[b..b + 24].copy_from_slice(&BlockHeader::from_parts(bad_prev, bad_next).to_bytes());
+            let err = read_all(bad).expect_err(&format!(
+                "inconsistent {label} pointer must be rejected, not silently accepted"
+            ));
+            assert!(
+                err.to_string().contains("chunk boundary"),
+                "{label}: unexpected error: {err}"
+            );
         }
     }
 
