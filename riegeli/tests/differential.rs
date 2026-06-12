@@ -690,23 +690,18 @@ fn i_randomized_projection_parity() {
     }
 }
 
-/// KNOWN-DIVERGENT (open maintainer question): a field number aliased
-/// between an INCLUDED top-level context and the interior of an EXCLUDED
-/// group. Observed (this minimal repro): C++ emits the occurrence inside
-/// the excluded group as well as the top-level one; this implementation
-/// emits only the top-level occurrence. Which output the format intends
-/// for aliased-field shapes is a question for the maintainer — neither
-/// behavior is asserted as correct here; BOTH are pinned so drift in
-/// either direction fails while the question is open. Mechanism
-/// (verified in the reference source): both engines resolve a shared
-/// tag node's inclusion DYNAMICALLY against the live ancestry, but the
-/// reference CACHES the first resolution on the node and reuses it for
-/// every later occurrence, while this implementation re-resolves per
-/// visit — so the reference's output depends on which occurrence
-/// decodes first (see the mirrored-order case below, where the cached
-/// exclusion DROPS the included occurrence).
+/// PARITY (was known-divergent): a field number aliased between an
+/// INCLUDED top-level context and the interior of an EXCLUDED group.
+/// Before the encoder scoped group fields under the group's message
+/// node, both occurrences of f3 fused into a single node and buffer, and
+/// the two decoders disagreed on which occurrences to emit (the
+/// reference caches the shared node's first inclusion resolution; this
+/// implementation re-resolves per visit). Now that the encoder gives the
+/// group-interior occurrence its own node, there is no shared state to
+/// resolve differently: both engines emit only the included top-level
+/// occurrence, with its own (correct) value.
 #[test]
-fn j_aliased_field_in_excluded_group_known_divergent() {
+fn j_aliased_field_in_excluded_group_parity() {
     // record: f4-group{ f3: 7 }, f3: 9  — f3 aliased inside the excluded
     // f4 group and at (included) top level. Projection: [3] full include.
     let mut record = encode_group(4, &encode_varint_field(3, 7));
@@ -725,32 +720,22 @@ fn j_aliased_field_in_excluded_group_known_divergent() {
     let top_only = encode_varint_field(3, 9);
     assert_eq!(
         rust_out,
-        vec![top_only],
-        "this implementation emits only the top-level occurrence"
+        vec![top_only.clone()],
+        "only the included top-level occurrence is emitted"
     );
-    let mut with_aliased = encode_varint_field(3, 7);
-    with_aliased.extend_from_slice(&encode_varint_field(3, 9));
-    assert_eq!(
-        cpp_out,
-        vec![with_aliased],
-        "C++ emits the excluded-group interior occurrence as well"
-    );
+    assert_eq!(cpp_out, vec![top_only], "the reference agrees");
 }
 
-/// KNOWN-DIVERGENT (same open question, mirrored order): identical
-/// structure to the case above with the wire order swapped — the
-/// top-level (included) occurrence comes FIRST in the record, so in
-/// backward decode the shared node's first resolution happens INSIDE the
-/// excluded group, and the reference caches the exclusion: the included
-/// top-level value is silently DROPPED. This implementation keeps the
-/// included occurrence, but since excluded occurrences never read their
-/// data buffer (C++ kEmptyReader semantics), the included occurrence
-/// reads the next unconsumed value from the shared buffer — the one the
-/// encoder wrote for the excluded interior occurrence. Together the two
-/// cases show aliased-field projection is order-dependent in both
-/// implementations; both shapes pinned.
+/// PARITY (was known-divergent, mirrored order): identical structure to
+/// the case above with the wire order swapped — the top-level (included)
+/// occurrence comes FIRST in the record. With the fused encoding this
+/// order made the reference cache an exclusion and DROP the included
+/// value, while this implementation kept it but read the wrong value
+/// from the shared buffer. With per-scope nodes both engines emit the
+/// included top-level occurrence with its own value, independent of wire
+/// order.
 #[test]
-fn j2_aliased_field_mirrored_order_known_divergent() {
+fn j2_aliased_field_mirrored_order_parity() {
     // record: f3: 9, f4-group{ f3: 7 } — top-level occurrence FIRST.
     let mut record = encode_varint_field(3, 9);
     record.extend_from_slice(&encode_group(4, &encode_varint_field(3, 7)));
@@ -765,17 +750,13 @@ fn j2_aliased_field_mirrored_order_known_divergent() {
     let rust_out = rust_read_projected(&data, proj);
     let cpp_out = cpp_read_projected(&data, &[vec![3]]);
 
+    let top_only = encode_varint_field(3, 9);
     assert_eq!(
         rust_out,
-        vec![encode_varint_field(3, 7)],
-        "this implementation keeps the included top-level occurrence, \
-         reading the next unconsumed value from the aliased buffer"
+        vec![top_only.clone()],
+        "only the included top-level occurrence is emitted"
     );
-    assert_eq!(
-        cpp_out,
-        vec![Vec::<u8>::new()],
-        "the reference's cached exclusion drops the included occurrence"
-    );
+    assert_eq!(cpp_out, vec![top_only], "the reference agrees");
 }
 
 /// MATCH: initial pos() and seek-to-start parity. The Rust reader
