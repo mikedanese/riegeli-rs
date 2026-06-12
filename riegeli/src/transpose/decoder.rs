@@ -1697,15 +1697,9 @@ fn execute_node_action(
                     "submessages still open at record boundary".into(),
                 ));
             }
-            if state.skipped_submessage_level != 0 {
-                return Err(RiegeliError::MalformedData(
-                    format!(
-                        "skipped_submessage_level is {} at record boundary, expected 0",
-                        state.skipped_submessage_level
-                    )
-                    .into(),
-                ));
-            }
+            // Note: C++ MessageStartCallback does not check
+            // skipped_submessage_level; only Finish() requires it to be 0
+            // once the whole decode is complete.
             if state.limits.len() as u64 == state.num_records {
                 return Err(RiegeliError::MalformedData("too many records".into()));
             }
@@ -2134,7 +2128,7 @@ fn run_state_machine(
         0
     };
 
-    {
+    let skipped_submessage_level = {
         let mut state = DecodeState {
             dest: &mut dest,
             buffers,
@@ -2161,11 +2155,18 @@ fn run_state_machine(
             current_node_idx = next;
             num_iters = iters;
         }
-    }
+        state.skipped_submessage_level
+    };
 
     if !submessage_stack.is_empty() {
         return Err(RiegeliError::MalformedData(
             "submessages still open after decode".into(),
+        ));
+    }
+    // C++ Finish(): "Skipped submessages still open".
+    if skipped_submessage_level != 0 {
+        return Err(RiegeliError::MalformedData(
+            "skipped submessages still open after decode".into(),
         ));
     }
     if limits.len() as u64 != num_records {
@@ -3893,5 +3894,88 @@ mod tests {
             resolve_select_callback(&select_node, &node_templates, &include_map, &[], &[], 0)
                 .unwrap();
         assert_eq!(result2, CallbackType::SubmessageStart);
+    }
+
+    // -------------------------------------------------------------------
+    // skipped_submessage_level end-of-decode check (C++ Finish())
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_skipped_submessage_open_at_end_rejected() {
+        // A SkippedSubmessageEnd executed after the final MessageStart leaves
+        // skipped_submessage_level != 0 when the transitions run out. C++
+        // Finish() rejects this with "Skipped submessages still open".
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+
+        let num_states = 3u32;
+        let states = vec![
+            // State 0: Varint field 1 (included), implicit to state 1.
+            TestState::new(0x08, num_states + 1, subtype::VARINT_1, 0),
+            // State 1: MessageStart, explicit to state 2.
+            TestState::new(message_id::START_OF_MESSAGE, 2, 0, 0),
+            // State 2: submessage end for field 2 (excluded ->
+            // SkippedSubmessageEnd), explicit next.
+            TestState::new((2 << 3) | SUBMESSAGE_WIRE_TYPE, 0, 0, 0),
+        ];
+
+        let buf0 = vec![0x05];
+        // One explicit transition: MessageStart -> state 2.
+        let transitions = vec![0x00];
+        let chunk = build_transpose_chunk(
+            CompressionType::None,
+            1,
+            2,
+            &states,
+            &[buf0],
+            &transitions,
+            0,
+        );
+
+        let result = TransposeChunkDecoder::new_with_projection(chunk, Some(&proj));
+        assert!(
+            result.is_err(),
+            "skipped submessage still open at end of decode must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_cross_record_skip_imbalance_accepted() {
+        // C++ MessageStartCallback does not check skipped_submessage_level;
+        // only Finish() requires it to be 0 at the end of the decode. A
+        // chunk whose skip level is non-zero at a record boundary but
+        // returns to 0 by the end is accepted by C++.
+        let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+
+        let states = vec![
+            // State 0: submessage end for excluded field 2.
+            TestState::new((2 << 3) | SUBMESSAGE_WIRE_TYPE, 1, 0, 0),
+            // State 1: MessageStart (record boundary while level == 1).
+            TestState::new(message_id::START_OF_MESSAGE, 2, 0, 0),
+            // State 2: StartOfSubmessage (resolves to SkippedSubmessageStart).
+            TestState::new(message_id::START_OF_SUBMESSAGE, 3, 0, 0),
+            // State 3: Varint field 1 (included).
+            TestState::new(0x08, 4, subtype::VARINT_1, 0),
+            // State 4: MessageStart.
+            TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0),
+        ];
+
+        let buf0 = vec![0x05];
+        // Four explicit transitions walking states 1, 2, 3, 4.
+        let transitions = vec![0x00, 0x00, 0x00, 0x00];
+        let chunk = build_transpose_chunk(
+            CompressionType::None,
+            2,
+            2,
+            &states,
+            &[buf0],
+            &transitions,
+            0,
+        );
+
+        let mut dec = TransposeChunkDecoder::new_with_projection(chunk, Some(&proj))
+            .expect("skip imbalance that nets to zero is accepted (C++ parity)");
+        assert_eq!(dec.read_record().unwrap().unwrap(), vec![0x08, 0x05]);
+        assert_eq!(dec.read_record().unwrap().unwrap(), Vec::<u8>::new());
+        assert!(dec.read_record().unwrap().is_none());
     }
 }
