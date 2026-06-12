@@ -102,8 +102,8 @@ fn bucket_fraction_half_produces_multiple_buckets() {
         out
     }
 
-    // Build 1000 proto records: field 1 (varint) + field 2 (fixed32)
-    // Each record is ~6 bytes; 1000 records ≈ 6 KB of data buffers.
+    // Build 1000 proto records: field 1 (varint) + field 2 (fixed32) +
+    // two string fields (3 and 4) of 8 bytes each.
     let mut records: Vec<Vec<u8>> = Vec::new();
     for i in 0u32..1000 {
         let mut rec = Vec::new();
@@ -111,18 +111,26 @@ fn bucket_fraction_half_produces_multiple_buckets() {
         rec.extend_from_slice(&encode_u64(i as u64));
         rec.push(0x15); // tag: field 2, fixed32
         rec.extend_from_slice(&i.to_le_bytes());
+        rec.push(0x1A); // tag: field 3, length-delimited
+        rec.push(8);
+        rec.extend_from_slice(&(i as u64).to_le_bytes());
+        rec.push(0x22); // tag: field 4, length-delimited
+        rec.push(8);
+        rec.extend_from_slice(&((i ^ 0xFFFF_FFFF) as u64).to_le_bytes());
         records.push(rec);
     }
     let refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     // Use a chunk_size large enough to hold all 1000 records, but a small
-    // bucket_fraction so that bucket_size << total data. This forces the
-    // greedy bucketing algorithm to emit multiple buckets.
+    // bucket_fraction so that bucket_size << total data. Bucket splitting
+    // operates within each buffer-type group (matching the C++ reference),
+    // so multiple buffers of the same type must together exceed bucket_size
+    // to force a split.
     //
     // chunk_size = 1 MiB. bucket_fraction = 0.001 → bucket_size = 1048 bytes → clamped to 4096.
-    // The data buffers for 1000 records are: varint buffer (~2 KiB) + fixed32 buffer (~4 KiB).
-    // With bucket_size = 4096: after adding the varint buffer (~2 KiB), when the fixed32
-    // buffer (~4 KiB) is evaluated: 2048 + 4096/2 = 4096 >= 4096 → new bucket triggered.
+    // The String group holds two ~9 KB buffers (fields 3 and 4); with
+    // bucket_size = 4096 they are split into separate buckets, whereas
+    // bucket_fraction = 1.0 puts the whole group in one bucket.
     let opts_multi = WriterOptions::new()
         .compression(CompressionType::Brotli)
         .transpose(true)
