@@ -8,6 +8,11 @@ file format. Riegeli is a seekable, compressed record store designed for high-th
 sequential reads and writes, commonly used in machine learning pipelines and large-scale
 data processing. This crate is byte-level compatible with the C++ reference implementation.
 
+The repository contains two crates: `riegeli`, the published library, and
+`riegeli-ffi`, an internal test harness that builds the C++ reference
+implementation for differential testing — it is never published and is not
+for external use.
+
 ## Quick start
 
 ```toml
