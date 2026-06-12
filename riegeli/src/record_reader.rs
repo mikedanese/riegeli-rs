@@ -793,7 +793,7 @@ impl<R: Read + Seek> RecordReader<R> {
                 Ok(Some(v)) => v,
                 Ok(None) => break, // EOF
                 Err(e) => {
-                    self.restore_state(
+                    self.restore_state_and_decoder(
                         saved_pos,
                         saved_last_pos,
                         saved_next_chunk_file_pos,
@@ -807,7 +807,7 @@ impl<R: Read + Seek> RecordReader<R> {
             };
 
             if !ch.is_header_valid() {
-                self.restore_state(
+                self.restore_state_and_decoder(
                     saved_pos,
                     saved_last_pos,
                     saved_next_chunk_file_pos,
@@ -835,8 +835,8 @@ impl<R: Read + Seek> RecordReader<R> {
             scan_pos = crate::block_arithmetic::chunk_end(chunk_begin, data_size, num_records);
         }
 
-        // Restore state.
-        self.restore_state(
+        // Restore state (including the active chunk decoder).
+        self.restore_state_and_decoder(
             saved_pos,
             saved_last_pos,
             saved_next_chunk_file_pos,
@@ -845,30 +845,6 @@ impl<R: Read + Seek> RecordReader<R> {
             saved_at_eof,
             saved_last_record_is_valid,
         );
-        // Also reset current_decoder to None (we disrupted the internal state).
-        // Seek back to restore the active decoder.
-        if !saved_at_eof {
-            // Special-case: if saved_pos is the initial position (numeric 0,
-            // before any records have been read), seek() would eagerly load
-            // and decode the first data chunk — wasted work, and under
-            // recovery it would fire the callback and consume a corrupt
-            // region the caller never read past. Restore the initial state
-            // directly instead.
-            let is_initial_position = saved_pos.chunk_begin == 0 && saved_pos.record_index == 0;
-
-            if is_initial_position {
-                // Restore directly without calling seek().
-                self.next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // = 64
-                self.at_eof = false;
-                self.current_decoder = None;
-            } else {
-                // Re-seek to restore decoder state.
-                let _ = self.seek(saved_pos);
-                // Restore last_pos and valid flag after seek changes them.
-                self.last_pos = saved_last_pos;
-                self.last_record_is_valid = saved_last_record_is_valid;
-            }
-        }
 
         Ok(total_records)
     }
@@ -942,6 +918,56 @@ impl<R: Read + Seek> RecordReader<R> {
         self.at_eof = at_eof;
         self.last_record_is_valid = last_record_is_valid;
         self.current_decoder = None;
+    }
+
+    // Restore reader state after a non-destructive scan, INCLUDING the
+    // active chunk decoder. restore_state alone nulls the decoder; without
+    // the re-seek below, a subsequent read_record() would fall through to
+    // next_chunk_file_pos (the NEXT chunk) and silently skip the rest of
+    // the current chunk — so every exit from such a scan, error paths
+    // included, must go through this.
+    #[allow(clippy::too_many_arguments)]
+    fn restore_state_and_decoder(
+        &mut self,
+        pos: RecordPosition,
+        last_pos: RecordPosition,
+        next_chunk_file_pos: u64,
+        current_chunk_begin: u64,
+        current_record_index: u64,
+        at_eof: bool,
+        last_record_is_valid: bool,
+    ) {
+        self.restore_state(
+            pos,
+            last_pos,
+            next_chunk_file_pos,
+            current_chunk_begin,
+            current_record_index,
+            at_eof,
+            last_record_is_valid,
+        );
+        if !at_eof {
+            // Special-case: if pos is the initial position (numeric 0,
+            // before any records have been read), seek() would eagerly load
+            // and decode the first data chunk — wasted work, and under
+            // recovery it would fire the callback and consume a corrupt
+            // region the caller never read past. Restore the initial state
+            // directly instead.
+            let is_initial_position = pos.chunk_begin == 0 && pos.record_index == 0;
+
+            if is_initial_position {
+                // Restore directly without calling seek().
+                self.next_chunk_file_pos = BLOCK_HEADER_SIZE + CHUNK_HEADER_SIZE; // = 64
+                self.at_eof = false;
+                self.current_decoder = None;
+            } else {
+                // Re-seek to restore decoder state.
+                let _ = self.seek(pos);
+                // Restore last_pos and valid flag after seek changes them.
+                self.last_pos = last_pos;
+                self.last_record_is_valid = last_record_is_valid;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2898,6 +2924,46 @@ mod tests {
             reader.read_record().expect("read ok").as_deref(),
             Some(&b"b"[..]),
             "reading continues with the next chunk"
+        );
+    }
+
+    /// size() promises to preserve the read position even when it FAILS:
+    /// the error paths used to restore the bookkeeping but not the chunk
+    /// decoder, so a caller that treated the error as informational and
+    /// kept reading silently skipped the rest of the current chunk (the
+    /// next read fell through to the next chunk).
+    #[test]
+    fn size_error_path_preserves_the_read_position() {
+        // [chunk A: a1 a2 a3][chunk B: b][40 bytes of hash-invalid header]
+        let file1 = write_records(&[b"a1", b"a2", b"a3"], WriterOptions::new());
+        let file2 = write_records(&[b"b"], WriterOptions::new());
+        let mut data = file1.clone();
+        data.extend_from_slice(&file2[64..]); // strip block header + signature
+        data.extend_from_slice(&[0xABu8; 40]); // corrupt trailing chunk header
+
+        let mut reader =
+            RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"a1"[..])
+        );
+
+        reader
+            .size()
+            .expect_err("size scan must fail on the corrupt trailing header");
+
+        // The failed size() must not disturb the position: the remaining
+        // records of chunk A still come back, then chunk B's.
+        for expected in [&b"a2"[..], &b"a3"[..], &b"b"[..]] {
+            assert_eq!(
+                reader.read_record().expect("read ok").as_deref(),
+                Some(expected),
+                "records must continue in order after a failed size()"
+            );
+        }
+        assert!(
+            reader.read_record().is_err(),
+            "the corrupt trailing header still errors on the read path"
         );
     }
 
