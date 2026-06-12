@@ -428,7 +428,7 @@ fn straddling_chunk_header_cpp_write_rust_read() {
 
 /// A transposed chunk claiming buffers but zero buckets (reduced from a
 /// failing fuzz input) must be REJECTED by both implementations — the Rust decoder
-/// errors with "buffers but no buckets", and the C++ reference fails the
+/// errors with "too few buckets", matching the C++ reference, which fails the
 /// same condition ("Too few buckets"). Pinning both sides keeps the hostile-
 /// input behavior from drifting apart.
 #[test]
@@ -462,7 +462,7 @@ fn hostile_buffers_without_buckets_rejected_by_both_implementations() {
         }
     };
     assert!(
-        rust_err.to_string().contains("buffers but no buckets"),
+        rust_err.to_string().contains("too few buckets"),
         "unexpected rust error: {rust_err}"
     );
 
