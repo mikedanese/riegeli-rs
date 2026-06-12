@@ -33,7 +33,7 @@ fn read_all(data: Vec<u8>) -> Vec<Vec<u8>> {
 const BLOCK_SIZE: u64 = 65536;
 
 // -----------------------------------------------------------------------
-// Criterion 7.2: initial_padding(65536) produces file_size % 65536 == 0
+// initial_padding(65536) produces file_size % 65536 == 0
 // -----------------------------------------------------------------------
 
 #[test]
@@ -82,7 +82,7 @@ fn initial_padding_aligns_multi_block_file() {
 }
 
 // -----------------------------------------------------------------------
-// Criterion 7.3: two padded files can be concatenated and read as one
+// two padded files can be concatenated and read as one
 // -----------------------------------------------------------------------
 
 #[test]
@@ -132,7 +132,7 @@ fn concatenated_padded_files_readable() {
 }
 
 // -----------------------------------------------------------------------
-// Criterion 7.4: TryFrom<u8> for CompressionType (public API)
+// TryFrom<u8> for CompressionType (public API)
 // -----------------------------------------------------------------------
 
 /// Small alignments (below the 40-byte chunk-header size) must still land

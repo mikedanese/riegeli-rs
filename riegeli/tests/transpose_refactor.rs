@@ -26,7 +26,7 @@ fn transpose_roundtrip(records: &[&[u8]], compression: CompressionType) -> Vec<V
     out
 }
 
-// ---- Criterion 23.5: behavioral correctness preserved ----
+// ---- behavioral correctness preserved ----
 
 #[test]
 fn adversarial_empty_records_transpose_roundtrip() {

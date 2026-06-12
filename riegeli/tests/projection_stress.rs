@@ -1,7 +1,7 @@
-//! Sprint 34 stress tests: verify projected decode correctness at volume.
+//! Volume stress tests for projected decode of transposed records.
 //!
-//! Decodes 10,000+ records with narrow projections and verifies every record
-//! matches the expected projection output.
+//! Encodes 10,000+ records, decodes them with various field projections,
+//! and verifies every record matches the expected projection output.
 
 use std::io::Cursor;
 
@@ -204,12 +204,12 @@ fn extract_field(record: &[u8], target_field: u32) -> Option<Vec<u8>> {
 }
 
 // ===========================================================================
-// Stress tests
+// Volume tests
 // ===========================================================================
 
-/// 34.5: 10,000 wide records, narrow projection (field 5), verify each record.
+/// 10,000 wide records, narrow projection (field 5), verify each record.
 #[test]
-fn stress_10k_wide_narrow_projection() {
+fn wide_records_narrow_projection_at_volume() {
     const N: usize = 10_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();
     let encoded = write_transpose(&records, CompressionType::None);
@@ -236,10 +236,10 @@ fn stress_10k_wide_narrow_projection() {
     }
 }
 
-/// 34.5 variant: 10,000 wide records with Zstd compression.
+/// 10,000 wide records with Zstd compression, narrow projection.
 #[test]
 #[cfg(feature = "zstd")]
-fn stress_10k_wide_narrow_projection_zstd() {
+fn narrow_projection_zstd_at_volume() {
     const N: usize = 10_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();
     let encoded = write_transpose(&records, CompressionType::Zstd);
@@ -255,9 +255,9 @@ fn stress_10k_wide_narrow_projection_zstd() {
     }
 }
 
-/// 34.5 variant: 10,000 nested records, project field at depth 3.
+/// 10,000 nested records, project field at depth 3.
 #[test]
-fn stress_10k_nested_depth3_projection() {
+fn nested_depth3_projection_at_volume() {
     const N: usize = 10_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_nested_record(i as u64)).collect();
     let encoded = write_transpose(&records, CompressionType::None);
@@ -289,9 +289,9 @@ fn stress_10k_nested_depth3_projection() {
     }
 }
 
-/// 34.5 variant: 15,000 records, multiple projected fields, verify correctness.
+/// 15,000 records, multiple projected fields, verify correctness.
 #[test]
-fn stress_15k_wide_two_fields() {
+fn two_field_projection_at_volume() {
     const N: usize = 15_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();
     let encoded = write_transpose(&records, CompressionType::None);
@@ -322,9 +322,9 @@ fn stress_15k_wide_two_fields() {
     }
 }
 
-/// Non-projected stress test: 10,000 records, verify byte-identical output.
+/// Non-projected baseline: 10,000 records, verify byte-identical output.
 #[test]
-fn stress_10k_non_projected() {
+fn non_projected_baseline_at_volume() {
     const N: usize = 10_000;
     let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();
     let encoded = write_transpose(&records, CompressionType::None);
@@ -342,27 +342,217 @@ fn stress_10k_non_projected() {
     }
 }
 
-/// Stress test with existence_only: 10,000 records.
+/// Heterogeneous records: alternating between records with different field
+/// counts. Tests that projection-during-decode handles schema variation
+/// correctly across 10,000 records.
 #[test]
-fn stress_10k_existence_only() {
+fn heterogeneous_schema_projection_at_volume() {
     const N: usize = 10_000;
-    let records: Vec<Vec<u8>> = (0..N).map(|i| make_wide_record(i as u64)).collect();
+    let mut records = Vec::new();
+    for i in 0..N {
+        let mut rec = Vec::new();
+        // All records have field 1
+        rec.extend(encode_varint_field(1, i as u64));
+        if i % 2 == 0 {
+            // Even records: have fields 1..5
+            for f in 2..=5 {
+                rec.extend(encode_varint_field(f, i as u64 + f as u64));
+            }
+        } else {
+            // Odd records: have fields 1..25
+            for f in 2..=25 {
+                rec.extend(encode_varint_field(f, i as u64 + f as u64));
+            }
+        }
+        records.push(rec);
+    }
+
     let encoded = write_transpose(&records, CompressionType::None);
 
-    // Field 5 (varint) as existence_only
-    let proj = FieldProjection::new().add_field(Field::new(vec![5]).existence_only());
+    // Project only field 1 — present in all records
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
     let decoded = read_projected(&encoded, proj);
 
     assert_eq!(decoded.len(), N);
-
-    // Expected: tag for field 5 (varint wire type) + 0x00 value
-    let expected = encode_varint_field(5, 0);
-
     for (i, rec) in decoded.iter().enumerate() {
+        let expected = encode_varint_field(1, i as u64);
         assert_eq!(
             rec, &expected,
-            "record {} mismatch in existence_only stress",
+            "record {} mismatch in heterogeneous test",
             i
         );
+    }
+}
+
+/// Project a field that only exists in half the records. Non-present
+/// records should produce empty output.
+#[test]
+fn partially_present_field_projection_at_volume() {
+    const N: usize = 10_000;
+    let mut records = Vec::new();
+    for i in 0..N {
+        let mut rec = Vec::new();
+        rec.extend(encode_varint_field(1, i as u64));
+        if i % 2 == 0 {
+            // Even records have field 99
+            rec.extend(encode_varint_field(99, i as u64 * 99));
+        }
+        records.push(rec);
+    }
+
+    let encoded = write_transpose(&records, CompressionType::None);
+    let proj = FieldProjection::new().add_field(Field::new(vec![99]));
+    let decoded = read_projected(&encoded, proj);
+
+    assert_eq!(decoded.len(), N);
+    for (i, rec) in decoded.iter().enumerate() {
+        if i % 2 == 0 {
+            let expected = encode_varint_field(99, i as u64 * 99);
+            assert_eq!(rec, &expected, "even record {} should have field 99", i);
+        } else {
+            assert!(
+                rec.is_empty(),
+                "odd record {} should be empty (field 99 absent)",
+                i
+            );
+        }
+    }
+}
+
+/// Large varint values (5-byte and 10-byte varints) under projection.
+/// Tests that skip_field_data handles multi-byte varints correctly.
+#[test]
+fn multibyte_varints_skipped_under_projection() {
+    const N: usize = 10_000;
+    let mut records = Vec::new();
+    for i in 0..N {
+        let mut rec = Vec::new();
+        // Field 1: normal value (projected)
+        rec.extend(encode_varint_field(1, i as u64));
+        // Field 2: large varint (skipped)
+        rec.extend(encode_varint_field(2, u64::MAX - i as u64));
+        // Field 3: 5-byte varint (skipped)
+        rec.extend(encode_varint_field(3, 0x1_0000_0000 + i as u64));
+        records.push(rec);
+    }
+
+    let encoded = write_transpose(&records, CompressionType::None);
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+    let decoded = read_projected(&encoded, proj);
+
+    assert_eq!(decoded.len(), N);
+    for (i, rec) in decoded.iter().enumerate() {
+        let expected = encode_varint_field(1, i as u64);
+        assert_eq!(rec, &expected, "record {} large varint skip failed", i);
+    }
+}
+
+/// Deeply nested projection (depth 4) with many sibling fields at each level.
+#[test]
+fn nested_depth4_projection_at_volume() {
+    const N: usize = 10_000;
+    let mut records = Vec::new();
+    for i in 0..N {
+        // Build depth-4: field 1.2.3.4
+        let innermost = encode_varint_field(4, i as u64 * 7);
+        let level3 = {
+            let mut v = Vec::new();
+            v.extend(encode_varint_field(1, i as u64));
+            v.extend(encode_submessage_field(4, &innermost));
+            v.extend(encode_varint_field(2, i as u64));
+            v
+        };
+        let level2 = {
+            let mut v = Vec::new();
+            v.extend(encode_varint_field(1, i as u64));
+            v.extend(encode_submessage_field(3, &level3));
+            v.extend(encode_varint_field(2, i as u64));
+            v
+        };
+        let level1 = {
+            let mut v = Vec::new();
+            v.extend(encode_varint_field(1, i as u64));
+            v.extend(encode_submessage_field(2, &level2));
+            v.extend(encode_varint_field(2, i as u64));
+            v
+        };
+
+        let mut rec = Vec::new();
+        rec.extend(encode_submessage_field(1, &level1));
+        // Padding fields
+        for f in 2..=15 {
+            rec.extend(encode_varint_field(f, i as u64 + f as u64));
+        }
+        records.push(rec);
+    }
+
+    let encoded = write_transpose(&records, CompressionType::None);
+    let proj = FieldProjection::new().add_field(Field::new(vec![1, 2, 3, 4]));
+    let decoded = read_projected(&encoded, proj);
+
+    assert_eq!(decoded.len(), N);
+    for (i, rec) in decoded.iter().enumerate() {
+        assert!(
+            !rec.is_empty(),
+            "record {} should not be empty (depth-4 projection)",
+            i
+        );
+    }
+}
+
+/// Empty records interspersed with normal records under projection.
+#[test]
+fn empty_records_interspersed_under_projection() {
+    const N: usize = 10_000;
+    let mut records = Vec::new();
+    for i in 0..N {
+        if i % 3 == 0 {
+            records.push(Vec::new()); // empty record
+        } else {
+            let mut rec = Vec::new();
+            rec.extend(encode_varint_field(1, i as u64));
+            rec.extend(encode_varint_field(2, i as u64 * 2));
+            records.push(rec);
+        }
+    }
+
+    let encoded = write_transpose(&records, CompressionType::None);
+    let proj = FieldProjection::new().add_field(Field::new(vec![1]));
+    let decoded = read_projected(&encoded, proj);
+
+    assert_eq!(decoded.len(), N);
+    for (i, rec) in decoded.iter().enumerate() {
+        if i % 3 == 0 {
+            assert!(rec.is_empty(), "record {} should be empty", i);
+        } else {
+            let expected = encode_varint_field(1, i as u64);
+            assert_eq!(rec, &expected, "record {} content mismatch", i);
+        }
+    }
+}
+
+/// Brotli compression + narrow projection at volume. Tests lazy bucket
+/// decompression under realistic compression.
+#[test]
+#[cfg(feature = "brotli")]
+fn narrow_projection_brotli_at_volume() {
+    const N: usize = 10_000;
+    let mut records = Vec::new();
+    for i in 0..N {
+        let mut rec = Vec::new();
+        for f in 1..=25 {
+            rec.extend(encode_varint_field(f, i as u64 * f as u64));
+        }
+        records.push(rec);
+    }
+
+    let encoded = write_transpose(&records, CompressionType::Brotli);
+    let proj = FieldProjection::new().add_field(Field::new(vec![13]));
+    let decoded = read_projected(&encoded, proj);
+
+    assert_eq!(decoded.len(), N);
+    for (i, rec) in decoded.iter().enumerate() {
+        let expected = encode_varint_field(13, i as u64 * 13);
+        assert_eq!(rec, &expected, "record {} brotli projection mismatch", i);
     }
 }

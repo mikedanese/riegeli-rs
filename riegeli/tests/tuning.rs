@@ -37,12 +37,12 @@ fn roundtrip(file_data: &[u8]) -> Result<Vec<Vec<u8>>, RiegeliError> {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 15.1: compression_level(11) + Brotli → smaller than quality-6
+// compression_level(11) + Brotli → smaller than quality-6
 // ---------------------------------------------------------------------------
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_15_1_brotli_level_11_smaller_than_default() {
+fn brotli_level_11_smaller_than_default() {
     // Use a payload that benefits from higher-quality Brotli:
     // A mix of repetitive patterns with some variation. 100 KiB total.
     // Brotli quality 11 finds more back-references than quality 6.
@@ -79,16 +79,16 @@ fn criterion_15_1_brotli_level_11_smaller_than_default() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 15.2: compression_level(1) and (22) + Zstd → valid readable files
+// compression_level(1) and (22) + Zstd → valid readable files
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Criterion 15.5: bucket_fraction(0.5) + transpose → >1 bucket, records OK
+// bucket_fraction(0.5) + transpose → >1 bucket, records OK
 // ---------------------------------------------------------------------------
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_15_5_bucket_fraction_half_produces_multiple_buckets() {
+fn bucket_fraction_half_produces_multiple_buckets() {
     fn encode_u64(mut v: u64) -> Vec<u8> {
         let mut out = Vec::new();
         loop {
@@ -153,11 +153,65 @@ fn criterion_15_5_bucket_fraction_half_produces_multiple_buckets() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 15.6: bucket_fraction(0.0) clamps; bucket_fraction(1.0) = single bucket
+// multiple buckets + CompressionType::None → byte-identical roundtrip
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_15_6_bucket_fraction_zero_clamps_to_min() {
+fn multi_bucket_uncompressed_roundtrip_byte_identical() {
+    fn encode_u64(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            if v < 0x80 {
+                out.push(v as u8);
+                break;
+            }
+            out.push((v as u8 & 0x7f) | 0x80);
+            v >>= 7;
+        }
+        out
+    }
+
+    // Build 1000 proto records: field 1 (varint) + field 2 (fixed32).
+    // Each record is ~6 bytes; 1000 records ≈ 6 KB of data buffers.
+    let mut records: Vec<Vec<u8>> = Vec::new();
+    for i in 0u32..1000 {
+        let mut rec = Vec::new();
+        rec.push(0x08); // tag: field 1, varint
+        rec.extend_from_slice(&encode_u64(i as u64));
+        rec.push(0x15); // tag: field 2, fixed32
+        rec.extend_from_slice(&i.to_le_bytes());
+        records.push(rec);
+    }
+    let refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+
+    // Same bucket arithmetic as bucket_fraction_half_produces_multiple_buckets:
+    // chunk_size = 1 MiB and bucket_fraction = 0.001 give a bucket size that
+    // clamps to 4096 bytes, so the ~6 KB of data buffers split across multiple
+    // buckets. With CompressionType::None the buckets are stored raw; the
+    // roundtrip must still be byte-identical.
+    let opts = WriterOptions::new()
+        .compression(CompressionType::None)
+        .transpose(true)
+        .chunk_size(1 << 20)
+        .bucket_fraction(0.001);
+
+    let file = write_to_buf(&refs, opts).expect("uncompressed multi-bucket write ok");
+    let decoded = roundtrip(&file).expect("uncompressed multi-bucket roundtrip ok");
+    assert_eq!(decoded.len(), 1000);
+    for (i, (got, expected)) in decoded.iter().zip(records.iter()).enumerate() {
+        assert_eq!(
+            got, expected,
+            "record {i} mismatch in uncompressed multi-bucket roundtrip"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bucket_fraction(0.0) clamps; bucket_fraction(1.0) = single bucket
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bucket_fraction_zero_clamps_to_min() {
     fn encode_u64(mut v: u64) -> Vec<u8> {
         let mut out = Vec::new();
         loop {
@@ -190,11 +244,11 @@ fn criterion_15_6_bucket_fraction_zero_clamps_to_min() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 15.7: final_padding(65536) → file size multiple after flush(); 2nd flush also
+// final_padding(65536) → file size multiple after flush(); 2nd flush also
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_15_7_final_padding_aligns_after_flush() {
+fn final_padding_aligns_after_flush() {
     use std::sync::{Arc, Mutex};
 
     struct SharedVec(Arc<Mutex<Vec<u8>>>);
@@ -253,11 +307,11 @@ fn criterion_15_7_final_padding_aligns_after_flush() {
 }
 
 // ---------------------------------------------------------------------------
-// Criterion 15.8: window_log(Some(15)) + CompressionType::None → error
+// window_log(Some(15)) + CompressionType::None → error
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_15_8_window_log_with_none_compression_is_error() {
+fn window_log_with_none_compression_is_error() {
     let opts = WriterOptions::new()
         .compression(CompressionType::None)
         .window_log(Some(15));
@@ -290,7 +344,7 @@ fn criterion_15_8_window_log_with_none_compression_is_error() {
 
 #[test]
 #[cfg(feature = "snappy")]
-fn criterion_15_8_window_log_with_snappy_is_error() {
+fn window_log_with_snappy_is_error() {
     let opts = WriterOptions::new()
         .compression(CompressionType::Snappy)
         .window_log(Some(15));

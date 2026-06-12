@@ -53,7 +53,7 @@ fn roundtrip_with_options(records: &[Vec<u8>], opts: WriterOptions) {
 }
 
 proptest! {
-    // Criterion 7.1: 1000 iterations for uncompressed mode.
+    // 1000 iterations for uncompressed mode.
     #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
 
     #[test]
@@ -64,7 +64,7 @@ proptest! {
 }
 
 proptest! {
-    // Criterion 7.1: 1000 iterations for Brotli compression.
+    // 1000 iterations for Brotli compression.
     #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
 
     #[test]

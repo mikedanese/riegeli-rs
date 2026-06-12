@@ -63,7 +63,7 @@ fn make_mixed_size_records(n: usize) -> Vec<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_21_1a_rust_write_transpose_none_100_cpp_read() {
+fn rust_write_transpose_none_100_cpp_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.1a rust-write/transpose+none/cpp-read",
@@ -81,7 +81,7 @@ fn criterion_21_1a_rust_write_transpose_none_100_cpp_read() {
 }
 
 #[test]
-fn criterion_21_1b_cpp_write_transpose_none_100_rust_read() {
+fn cpp_write_transpose_none_100_rust_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.1b cpp-write/transpose+none/rust-read",
@@ -104,7 +104,7 @@ fn criterion_21_1b_cpp_write_transpose_none_100_rust_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_2a_rust_write_transpose_brotli6_100_cpp_read() {
+fn rust_write_transpose_brotli6_100_cpp_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.2a rust-write/transpose+brotli:6/cpp-read",
@@ -123,7 +123,7 @@ fn criterion_21_2a_rust_write_transpose_brotli6_100_cpp_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_2b_cpp_write_transpose_brotli6_100_rust_read() {
+fn cpp_write_transpose_brotli6_100_rust_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.2b cpp-write/transpose+brotli:6/rust-read",
@@ -146,7 +146,7 @@ fn criterion_21_2b_cpp_write_transpose_brotli6_100_rust_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_21_3a_rust_write_transpose_zstd3_100_cpp_read() {
+fn rust_write_transpose_zstd3_100_cpp_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.3a rust-write/transpose+zstd:3/cpp-read",
@@ -165,7 +165,7 @@ fn criterion_21_3a_rust_write_transpose_zstd3_100_cpp_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_21_3b_cpp_write_transpose_zstd3_100_rust_read() {
+fn cpp_write_transpose_zstd3_100_rust_read() {
     let records = make_non_proto_records(100);
     cross_lang_roundtrip(
         "21.3b cpp-write/transpose+zstd:3/rust-read",
@@ -188,7 +188,7 @@ fn criterion_21_3b_cpp_write_transpose_zstd3_100_rust_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_4a_rust_write_transpose_brotli6_10k_cpp_read() {
+fn rust_write_transpose_brotli6_10k_cpp_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
         "21.4a rust-write/transpose+brotli:6/10k×1KiB/cpp-read",
@@ -207,7 +207,7 @@ fn criterion_21_4a_rust_write_transpose_brotli6_10k_cpp_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_4b_cpp_write_transpose_brotli6_10k_rust_read() {
+fn cpp_write_transpose_brotli6_10k_rust_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
         "21.4b cpp-write/transpose+brotli:6/10k×1KiB/rust-read",
@@ -230,7 +230,7 @@ fn criterion_21_4b_cpp_write_transpose_brotli6_10k_rust_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_21_5a_rust_write_transpose_zstd3_mixed_cpp_read() {
+fn rust_write_transpose_zstd3_mixed_cpp_read() {
     // 100 records cycling through empty, 1-byte, 100-byte, 1 KiB, 10 KiB
     let records = make_mixed_size_records(100);
     cross_lang_roundtrip(
@@ -250,7 +250,7 @@ fn criterion_21_5a_rust_write_transpose_zstd3_mixed_cpp_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_21_5b_cpp_write_transpose_zstd3_mixed_rust_read() {
+fn cpp_write_transpose_zstd3_mixed_rust_read() {
     let records = make_mixed_size_records(100);
     cross_lang_roundtrip(
         "21.5b cpp-write/transpose+zstd:3/mixed-sizes/rust-read",
@@ -272,7 +272,7 @@ fn criterion_21_5b_cpp_write_transpose_zstd3_mixed_rust_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_21_6a_rust_write_transpose_none_single_record_cpp_read() {
+fn rust_write_transpose_none_single_record_cpp_read() {
     let records = vec![b"single transpose record".to_vec()];
     cross_lang_roundtrip(
         "21.6a rust-write/transpose+none/single/cpp-read",
@@ -290,7 +290,7 @@ fn criterion_21_6a_rust_write_transpose_none_single_record_cpp_read() {
 }
 
 #[test]
-fn criterion_21_6b_cpp_write_transpose_none_single_record_rust_read() {
+fn cpp_write_transpose_none_single_record_rust_read() {
     let records = vec![b"single transpose record".to_vec()];
     cross_lang_roundtrip(
         "21.6b cpp-write/transpose+none/single/rust-read",
@@ -308,7 +308,7 @@ fn criterion_21_6b_cpp_write_transpose_none_single_record_rust_read() {
 }
 
 #[test]
-fn criterion_21_6c_rust_write_transpose_none_two_records_cpp_read() {
+fn rust_write_transpose_none_two_records_cpp_read() {
     let records = vec![b"first record".to_vec(), b"second record".to_vec()];
     cross_lang_roundtrip(
         "21.6c rust-write/transpose+none/two-records/cpp-read",
@@ -326,7 +326,7 @@ fn criterion_21_6c_rust_write_transpose_none_two_records_cpp_read() {
 }
 
 #[test]
-fn criterion_21_6d_cpp_write_transpose_none_two_records_rust_read() {
+fn cpp_write_transpose_none_two_records_rust_read() {
     let records = vec![b"first record".to_vec(), b"second record".to_vec()];
     cross_lang_roundtrip(
         "21.6d cpp-write/transpose+none/two-records/rust-read",
@@ -349,7 +349,7 @@ fn criterion_21_6d_cpp_write_transpose_none_two_records_rust_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_7a_rust_write_transpose_brotli_small_chunks_cpp_read() {
+fn rust_write_transpose_brotli_small_chunks_cpp_read() {
     let records = make_small_records(500);
     cross_lang_roundtrip(
         "21.7a rust-write/transpose+brotli/chunk_size=4096/500/cpp-read",
@@ -369,7 +369,7 @@ fn criterion_21_7a_rust_write_transpose_brotli_small_chunks_cpp_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_21_7b_cpp_write_transpose_brotli_small_chunks_rust_read() {
+fn cpp_write_transpose_brotli_small_chunks_rust_read() {
     let records = make_small_records(500);
     cross_lang_roundtrip(
         "21.7b cpp-write/transpose+brotli/chunk_size=4096/500/rust-read",

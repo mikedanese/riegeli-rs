@@ -1,8 +1,8 @@
 //! Builder for incrementally constructing serialized protobuf messages.
 
-use super::field_iter::{ProtoField, serialize_field};
+use super::field_iter::{serialize_field, ProtoField};
 use super::wire::{
-    WireType, encode_tag, encode_varint32, encode_varint64, zigzag_encode_i32, zigzag_encode_i64,
+    encode_tag, encode_varint32, encode_varint64, zigzag_encode_i32, zigzag_encode_i64, WireType,
 };
 
 /// The maximum length of a length-delimited field body (2 GiB, the proto limit).
@@ -331,5 +331,59 @@ impl SerializedMessageWriter {
 impl Default for SerializedMessageWriter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_after_all_scopes_closed_is_error() {
+        let mut w = SerializedMessageWriter::new();
+        w.open_length_delimited(1).unwrap();
+        w.write_uint64(1, 42).unwrap();
+        w.close_length_delimited().unwrap();
+        // Second close should fail: no scope is open anymore.
+        assert!(w.close_length_delimited().is_err());
+    }
+
+    #[test]
+    fn finish_with_partially_closed_nesting_is_error() {
+        let mut w = SerializedMessageWriter::new();
+        w.open_length_delimited(1).unwrap();
+        w.open_length_delimited(2).unwrap();
+        w.write_uint64(1, 1).unwrap();
+        w.close_length_delimited().unwrap(); // closes field 2
+                                             // field 1 still open
+        assert!(w.finish().is_err());
+    }
+
+    #[test]
+    fn field_number_zero_not_validated() {
+        // The writer doesn't validate field numbers, so field_number=0
+        // produces a message that is_proto_message rejects.
+        let mut w = SerializedMessageWriter::new();
+        w.write_uint64(0, 1).unwrap();
+        let bytes = w.finish().unwrap();
+        // tag = (0 << 3) | 0 = 0, which is not a valid proto tag
+        assert!(!crate::proto::is_proto_message(&bytes));
+    }
+
+    #[test]
+    fn as_bytes_reflects_open_scope_buffer() {
+        let mut w = SerializedMessageWriter::new();
+        w.write_uint64(1, 1).unwrap();
+        let before_open = w.as_bytes().len();
+        w.open_length_delimited(2).unwrap();
+        // After open, buffer has the tag but no length varint yet
+        let after_open = w.as_bytes().len();
+        assert!(after_open > before_open);
+        w.write_uint64(1, 2).unwrap();
+        w.close_length_delimited().unwrap();
+        // After close, the length is spliced in
+        let after_close = w.as_bytes().len();
+        assert!(after_close > after_open);
+        let _ = w.finish().unwrap();
     }
 }

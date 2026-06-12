@@ -20,7 +20,7 @@ use riegeli_ffi::{Compression, WriterOptions as FfiWriterOptions};
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_20_1_rust_write_none_100_cpp_read() {
+fn rust_write_none_100_cpp_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.1 rust-write/none/cpp-read",
@@ -40,7 +40,7 @@ fn criterion_20_1_rust_write_none_100_cpp_read() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_20_2_cpp_write_none_100_rust_read() {
+fn cpp_write_none_100_rust_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.2 cpp-write/none/rust-read",
@@ -56,7 +56,7 @@ fn criterion_20_2_cpp_write_none_100_rust_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_20_3_rust_write_brotli6_10k_cpp_read() {
+fn rust_write_brotli6_10k_cpp_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
         "20.3 rust-write/brotli:6/cpp-read 10k×1KiB",
@@ -77,7 +77,7 @@ fn criterion_20_3_rust_write_brotli6_10k_cpp_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_20_4_cpp_write_brotli6_10k_rust_read() {
+fn cpp_write_brotli6_10k_rust_read() {
     let records = make_large_records(10_000, 1024);
     cross_lang_roundtrip(
         "20.4 cpp-write/brotli:6/rust-read 10k×1KiB",
@@ -98,7 +98,7 @@ fn criterion_20_4_cpp_write_brotli6_10k_rust_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_20_5a_rust_write_zstd3_cpp_read() {
+fn rust_write_zstd3_cpp_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.5a rust-write/zstd:3/cpp-read",
@@ -115,7 +115,7 @@ fn criterion_20_5a_rust_write_zstd3_cpp_read() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_20_5b_cpp_write_zstd3_rust_read() {
+fn cpp_write_zstd3_rust_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.5b cpp-write/zstd:3/rust-read",
@@ -136,7 +136,7 @@ fn criterion_20_5b_cpp_write_zstd3_rust_read() {
 
 #[test]
 #[cfg(feature = "snappy")]
-fn criterion_20_6a_rust_write_snappy_cpp_read() {
+fn rust_write_snappy_cpp_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.6a rust-write/snappy/cpp-read",
@@ -153,7 +153,7 @@ fn criterion_20_6a_rust_write_snappy_cpp_read() {
 
 #[test]
 #[cfg(feature = "snappy")]
-fn criterion_20_6b_cpp_write_snappy_rust_read() {
+fn cpp_write_snappy_rust_read() {
     let records = make_small_records(100);
     cross_lang_roundtrip(
         "20.6b cpp-write/snappy/rust-read",
@@ -174,7 +174,7 @@ fn criterion_20_6b_cpp_write_snappy_rust_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_20_7a_rust_write_brotli_single_record_cpp_read() {
+fn rust_write_brotli_single_record_cpp_read() {
     let records = vec![b"the only record".to_vec()];
     cross_lang_roundtrip(
         "20.7a rust-write/brotli/single-record/cpp-read",
@@ -191,7 +191,7 @@ fn criterion_20_7a_rust_write_brotli_single_record_cpp_read() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_20_7b_cpp_write_brotli_single_record_rust_read() {
+fn cpp_write_brotli_single_record_rust_read() {
     let records = vec![b"the only record".to_vec()];
     cross_lang_roundtrip(
         "20.7b cpp-write/brotli/single-record/rust-read",
@@ -209,7 +209,7 @@ fn criterion_20_7b_cpp_write_brotli_single_record_rust_read() {
 // Not gated on the brotli feature: zero records are written, so no brotli
 // code runs and the empty-file edge stays covered in reduced-feature builds.
 #[test]
-fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
+fn rust_write_brotli_empty_file_cpp_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
         "20.7c rust-write/brotli/empty/cpp-read",
@@ -227,7 +227,7 @@ fn criterion_20_7c_rust_write_brotli_empty_file_cpp_read() {
 // Not gated on the brotli feature: zero records are written, so no brotli
 // code runs and the empty-file edge stays covered in reduced-feature builds.
 #[test]
-fn criterion_20_7d_cpp_write_brotli_empty_file_rust_read() {
+fn cpp_write_brotli_empty_file_rust_read() {
     let records: Vec<Vec<u8>> = vec![];
     cross_lang_roundtrip(
         "20.7d cpp-write/brotli/empty/rust-read",

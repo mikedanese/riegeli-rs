@@ -558,6 +558,51 @@ mod tests {
         assert!(is_proto_message(&[0x12, 0x03, b'a', b'b', b'c']));
     }
 
+    // ---- read_canonical_varint64 ----
+
+    #[test]
+    fn read_varint64_offset_past_end_none() {
+        // An offset beyond the end of the buffer must return None rather
+        // than panicking on the out-of-range slice.
+        let data = [0x01];
+        assert_eq!(read_canonical_varint64(&data, 100), None);
+    }
+
+    #[test]
+    fn read_varint64_tenth_byte_overflow_rejected() {
+        // The 10th byte of a varint64 may only carry the lowest bit; a value
+        // above 0x01 overflows u64 and must be rejected.
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        assert_eq!(read_canonical_varint64(&data, 0), None);
+    }
+
+    // ---- make_tag overflow ----
+
+    #[test]
+    fn make_tag_field_number_overflow_wraps() {
+        // Field numbers above the 29-bit maximum shift bits out of the u32
+        // tag; the result wraps rather than panicking.
+        let tag = make_tag(0x20000000, WireType::Varint);
+        assert_eq!(tag, 0, "overflow wraps to 0");
+    }
+
+    // ---- varint encoders agree ----
+
+    #[test]
+    fn encode_varint32_64_agree() {
+        for &val in &[0u32, 1, 127, 128, 16383, 16384, u32::MAX] {
+            let mut buf32 = Vec::new();
+            let mut buf64 = Vec::new();
+            encode_varint32(&mut buf32, val);
+            encode_varint64(&mut buf64, val as u64);
+            assert_eq!(
+                buf32, buf64,
+                "encode_varint32 and encode_varint64 must agree for value {}",
+                val
+            );
+        }
+    }
+
     #[test]
     fn test_mixed_valid_fields_all_types() {
         let mut data = Vec::new();

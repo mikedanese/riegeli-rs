@@ -60,7 +60,7 @@ fn writer_reader_roundtrip(records: &[Vec<u8>], opts: WriterOptions) -> Vec<Vec<
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_13_2_writer_reader_transpose_brotli() {
+fn writer_reader_transpose_brotli() {
     let records: Vec<Vec<u8>> = (0..500)
         .map(|i| make_proto_3_varints(i, i * 7, i * 13))
         .collect();
@@ -79,7 +79,7 @@ fn criterion_13_2_writer_reader_transpose_brotli() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterion_13_6_multi_block_transpose_valid_headers() {
+fn multi_block_transpose_valid_headers() {
     // Write enough data to span multiple blocks (each block = 64 KiB).
     // Use large records with unique data to prevent extreme compression,
     // and a small chunk_size to force many chunks that cross block boundaries.
@@ -136,7 +136,7 @@ fn criterion_13_6_multi_block_transpose_valid_headers() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_13_8_writer_reader_byte_fidelity() {
+fn writer_reader_byte_fidelity() {
     let records: Vec<Vec<u8>> = (0..1000)
         .map(|i| make_proto_3_varints(i, i * 3 + 1, i * 7 + 2))
         .collect();
@@ -159,7 +159,7 @@ fn criterion_13_8_writer_reader_byte_fidelity() {
 
 #[test]
 #[cfg(feature = "zstd")]
-fn criterion_13_8_writer_reader_transpose_zstd() {
+fn writer_reader_transpose_zstd() {
     let records: Vec<Vec<u8>> = (0..500)
         .map(|i| make_proto_3_varints(i, i + 100, i + 200))
         .collect();
@@ -176,7 +176,7 @@ fn criterion_13_8_writer_reader_transpose_zstd() {
 
 #[test]
 #[cfg(feature = "brotli")]
-fn criterion_13_8_writer_reader_mixed_records() {
+fn writer_reader_mixed_records() {
     let mut records: Vec<Vec<u8>> = Vec::new();
     for i in 0..200u64 {
         if i % 3 == 0 {
