@@ -65,6 +65,17 @@ impl FromStr for RecordPosition {
                 format!("invalid record_index in RecordPosition: {e}").into(),
             )
         })?;
+        // Match the reference implementation: reject positions where
+        // chunk_begin + record_index would overflow, so that numeric() is
+        // always exact and order-consistent.
+        if record_index > u64::MAX - chunk_begin {
+            return Err(RiegeliError::MalformedData(
+                format!(
+                    "RecordPosition overflow: chunk_begin {chunk_begin} + record_index {record_index} exceeds u64::MAX"
+                )
+                .into(),
+            ));
+        }
         Ok(Self {
             chunk_begin,
             record_index,
@@ -103,5 +114,20 @@ mod tests {
         assert!("no-slash".parse::<RecordPosition>().is_err());
         assert!("abc/0".parse::<RecordPosition>().is_err());
         assert!("0/abc".parse::<RecordPosition>().is_err());
+    }
+
+    #[test]
+    fn from_str_rejects_numeric_overflow() {
+        // The C++ reference (RecordPosition::FromString) rejects any pair where
+        // chunk_begin + record_index would overflow u64, so that numeric() is
+        // always exact and order-consistent.
+        assert!("18446744073709551615/1".parse::<RecordPosition>().is_err());
+        assert!("18446744073709551615/5".parse::<RecordPosition>().is_err());
+        assert!("1/18446744073709551615".parse::<RecordPosition>().is_err());
+        // The boundary case chunk_begin + record_index == u64::MAX is valid.
+        let pos: RecordPosition = "18446744073709551615/0".parse().expect("parse ok");
+        assert_eq!(pos.numeric(), u64::MAX);
+        let pos2: RecordPosition = "0/18446744073709551615".parse().expect("parse ok");
+        assert_eq!(pos2.numeric(), u64::MAX);
     }
 }
