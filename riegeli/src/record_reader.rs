@@ -300,15 +300,18 @@ impl<R: Read + Seek> RecordReader<R> {
 
     /// Returns the current logical read position.
     ///
-    /// Before the first `read_record()` call, returns `{ chunk_begin: 24, record_index: 0 }`.
-    /// After reading records, points at the next record to be returned.
+    /// Before the first `read_record()` call, returns the initial position
+    /// `{ chunk_begin: 0, record_index: 0 }` (numeric 0, matching the C++
+    /// reference). After reading records, points at the next record to be
+    /// returned.
     pub fn pos(&self) -> RecordPosition {
         self.pos
     }
 
     /// Returns the position of the last successfully read record.
     ///
-    /// Before any records have been read, returns `{ chunk_begin: 24, record_index: 0 }`.
+    /// Before any records have been read, returns the initial position
+    /// `{ chunk_begin: 0, record_index: 0 }` (numeric 0).
     pub fn last_pos(&self) -> RecordPosition {
         self.last_pos
     }
@@ -755,9 +758,8 @@ impl<R: Read + Seek> RecordReader<R> {
     /// Returns `Ok(true)` if there is a previous record to seek to.
     /// Returns `Ok(false)` if positioned at or before the first record.
     pub fn seek_back(&mut self) -> Result<bool, RiegeliError> {
-        // The initial position: chunk_begin=24 (BLOCK_HEADER_SIZE), record_index=0.
-        // If last_pos is the initial position, there is no previous record.
-        // The initial position (no record read yet) is numeric 0.
+        // The initial position (no record read yet) is numeric 0; if
+        // last_pos is still there, there is no previous record.
         if self.last_pos.chunk_begin == 0 && self.last_pos.record_index == 0 {
             return Ok(false);
         }
@@ -850,12 +852,13 @@ impl<R: Read + Seek> RecordReader<R> {
         // Also reset current_decoder to None (we disrupted the internal state).
         // Seek back to restore the active decoder.
         if !saved_at_eof {
-            // Special-case: if saved_pos is the initial position (before any
-            // records have been read), seek() would try to load the chunk at
-            // chunk_begin=24 (the signature chunk), which sets at_eof=true and
-            // breaks subsequent reads. Instead, directly restore the initial state.
-            let is_initial_position =
-                saved_pos.chunk_begin == BLOCK_HEADER_SIZE && saved_pos.record_index == 0;
+            // Special-case: if saved_pos is the initial position (numeric 0,
+            // before any records have been read), seek() would eagerly load
+            // and decode the first data chunk — wasted work, and under
+            // recovery it would fire the callback and consume a corrupt
+            // region the caller never read past. Restore the initial state
+            // directly instead.
+            let is_initial_position = saved_pos.chunk_begin == 0 && saved_pos.record_index == 0;
 
             if is_initial_position {
                 // Restore directly without calling seek().
@@ -2874,6 +2877,48 @@ mod tests {
         // Sanity: a writer-produced file still opens (its signature IS the
         // canonical constant).
         RecordReader::new(Cursor::new(valid), ReaderOptions::new()).expect("valid file opens");
+    }
+
+    /// size() before the first read must restore the true initial position
+    /// (numeric 0) without seeking: the restore special case used to test
+    /// the stale chunk_begin==24 model, so it never fired, and the generic
+    /// seek path eagerly decoded the first data chunk — firing (and
+    /// consuming) a recovery region that the caller never read past.
+    #[test]
+    fn size_at_initial_position_restores_without_decoding_chunk_data() {
+        // [chunk a: CORRUPT data, valid header][chunk b: intact]
+        let one = write_records(&[b"a"], WriterOptions::new().chunk_size(1));
+        let two = write_records(&[b"a", b"b"], WriterOptions::new().chunk_size(1));
+        let mut data = two.clone();
+        data[one.len() - 1] ^= 0xFF; // corrupt chunk a's final data byte
+
+        let count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+        let rc = Rc::clone(&count);
+        let opts = ReaderOptions::new().recovery(move |_r| {
+            *rc.borrow_mut() += 1;
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+
+        let pos_before = reader.pos();
+        assert_eq!(pos_before.numeric(), 0, "initial position is numeric 0");
+        // size() reads only chunk headers (both are hash-valid), so it
+        // succeeds and must not touch chunk data or the recovery machinery.
+        assert_eq!(reader.size().expect("size ok"), 2);
+        assert_eq!(*count.borrow(), 0, "size() must not fire recovery");
+        assert_eq!(
+            reader.pos(),
+            pos_before,
+            "size() must preserve the initial read position"
+        );
+
+        // The corrupt region is still intact for the actual read: recovery
+        // fires now, and the intact sibling is returned.
+        assert_eq!(
+            reader.read_record().expect("read ok").as_deref(),
+            Some(&b"b"[..])
+        );
+        assert_eq!(*count.borrow(), 1, "read-path recovery fires normally");
     }
 
     /// A reader over a file that grows between reads is supported: hitting
