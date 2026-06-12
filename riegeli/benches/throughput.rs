@@ -263,7 +263,7 @@ fn bench_read(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_projection_placeholder(c: &mut Criterion) {
-    // Placeholder for transpose+brotli:6+projection (Sprint 18).
+    // Placeholder for transpose+brotli:6+projection.
     // This benchmark exists so the 9-row matrix is visible, but it currently
     // just reads without projection (same as transpose_brotli_6/read).
     let records = make_records();

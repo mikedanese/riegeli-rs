@@ -1,4 +1,4 @@
-//! Sprint 25 tests: Proto field iterator and public wire helpers.
+//! Proto field iterator and public wire helper tests.
 
 use riegeli::proto::{
     FieldValue, ProtoField, ProtoFieldIter, WireType, encode_tag, encode_varint32, encode_varint64,

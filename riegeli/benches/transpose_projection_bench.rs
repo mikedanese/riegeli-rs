@@ -1,4 +1,4 @@
-//! Criterion benchmarks for transpose projection optimizations (Phase 6).
+//! Criterion benchmarks for transpose projection optimizations.
 //!
 //! Measures throughput improvement from projection-during-decode vs.
 //! the pre-phase-6 baseline of full decode + post-decode field filtering.

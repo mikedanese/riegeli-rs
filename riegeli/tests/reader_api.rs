@@ -30,7 +30,6 @@ fn open_reader(data: Vec<u8>) -> RecordReader<Cursor<Vec<u8>>> {
     RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new")
 }
 
-// ─── Criterion 1 ───────────────────────────────────────────────────────────────
 /// A file written with set_metadata is read back via read_metadata().
 #[test]
 fn set_metadata_round_trip() {
@@ -45,7 +44,6 @@ fn set_metadata_round_trip() {
     assert_eq!(meta, Some(payload));
 }
 
-// ─── Criterion 3 ───────────────────────────────────────────────────────────────
 /// last_record_is_valid() is true after a valid read, false after recovery.
 #[test]
 fn last_record_is_valid() {
@@ -94,7 +92,6 @@ fn last_record_is_valid() {
     );
 }
 
-// ─── Criterion 4 ───────────────────────────────────────────────────────────────
 /// seek_back() after reading record 5 of 10 returns Ok(true) and re-reads record 5.
 #[test]
 fn seek_back_returns_previous_record() {
@@ -122,7 +119,6 @@ fn seek_back_returns_previous_record() {
     assert_eq!(re_read, fifth, "seek_back should re-read the 5th record");
 }
 
-// ─── Criterion 5 ───────────────────────────────────────────────────────────────
 /// seek_back() at the very first record returns Ok(false).
 #[test]
 fn seek_back_at_start_returns_false() {
@@ -134,7 +130,6 @@ fn seek_back_at_start_returns_false() {
     assert!(!result, "seek_back before any read should return false");
 }
 
-// ─── Criterion 6 ───────────────────────────────────────────────────────────────
 /// size() returns 1000 for a 1000-record file and does not change the read position.
 #[test]
 fn size_returns_count_and_preserves_position() {
@@ -169,7 +164,6 @@ fn size_returns_count_and_preserves_position() {
     );
 }
 
-// ─── Criterion 7 ───────────────────────────────────────────────────────────────
 /// check_file_format() returns Ok on a valid file, Err on corrupted data hash.
 #[test]
 fn check_file_format_valid_and_corrupted() {
