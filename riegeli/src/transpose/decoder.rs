@@ -1185,6 +1185,14 @@ impl TransposeChunkDecoder {
             ));
         }
 
+        // The decompressed header must be fully consumed (C++
+        // header_decompressor.VerifyEndAndClose()).
+        if !hdr.is_empty() {
+            return Err(RiegeliError::MalformedData(
+                "trailing data in transpose header".into(),
+            ));
+        }
+
         Ok(BuiltStateMachine {
             nodes,
             first_node,
@@ -3064,6 +3072,35 @@ mod tests {
         let chunk = nonproto_chunk_with_buckets(&[5, 1], &bucket_bytes);
         let mut dec = TransposeChunkDecoder::new(chunk).expect("exact layout decodes");
         assert_eq!(dec.read_record().unwrap().unwrap(), b"hello");
+    }
+
+    // -------------------------------------------------------------------
+    // Trailing bytes in the decompressed header (C++ VerifyEndAndClose)
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_trailing_header_bytes_rejected() {
+        // The C++ decoder verifies the decompressed header is fully consumed
+        // after reading first_node (header_decompressor.VerifyEndAndClose());
+        // trailing garbage in the header blob must fail the chunk.
+        let states = vec![TestState::new(message_id::NON_PROTO, 0, 0, 0)];
+        let mut bucket_bytes = b"hello".to_vec();
+        bucket_bytes.extend_from_slice(&encode_u32(5));
+        let chunk = build_transpose_chunk_with_buckets(
+            CompressionType::None,
+            1,
+            5,
+            &states,
+            &[6],
+            &[5, 1],
+            &bucket_bytes,
+            &[],
+            0,
+            &[0xAA], // trailing garbage after first_node
+        );
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "trailing header bytes must be rejected"
+        );
     }
 
     // -------------------------------------------------------------------
