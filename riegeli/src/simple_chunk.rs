@@ -243,8 +243,17 @@ impl SimpleChunkDecoder {
         }
 
         let data = &chunk.data;
-        let num_records = chunk.header.num_records() as usize;
+        // C++ SimpleDecoder::Decode rejects header claims that do not fit in
+        // size_t before converting ("Too many records" / "Records too large");
+        // on a 32-bit target an `as usize` cast of a >4 GiB claim would
+        // silently truncate and decode wrong data instead of failing.
+        let Ok(num_records) = usize::try_from(chunk.header.num_records()) else {
+            return Err(RiegeliError::MalformedData("too many records".into()));
+        };
         let decoded_data_size = chunk.header.decoded_data_size();
+        if usize::try_from(decoded_data_size).is_err() {
+            return Err(RiegeliError::MalformedData("records too large".into()));
+        }
 
         // Must have at least 1 byte for compression type.
         if data.is_empty() {
@@ -333,21 +342,21 @@ fn decode_uncompressed(
     let (sizes_byte_len, varint_consumed) = decode_u64(payload).map_err(|e| {
         RiegeliError::MalformedData(format!("failed to read sizes_byte_length: {e}").into())
     })?;
-    let sizes_byte_len = sizes_byte_len as usize;
 
     let sizes_start = varint_consumed;
-    // checked_add: sizes_byte_len is attacker-claimed; a wrapping add here
-    // would let the truncation check pass and the slice below panic.
-    let sizes_end = sizes_start
-        .checked_add(sizes_byte_len)
-        .ok_or_else(|| RiegeliError::MalformedData("sizes section length overflows".into()))?;
-    if sizes_end > payload.len() {
+    // Compare in u64: sizes_byte_len is attacker-claimed, and on a 32-bit
+    // target an `as usize` cast of a >4 GiB claim would truncate and let
+    // the truncation check pass with the wrong length (and the slice below
+    // panic).
+    if sizes_byte_len > (payload.len() - sizes_start) as u64 {
         return Err(RiegeliError::MalformedData(format!(
             "sizes section truncated: need {sizes_byte_len} bytes starting at offset {sizes_start}, \
              but payload is only {} bytes",
             payload.len()
         ).into()));
     }
+    let sizes_byte_len = sizes_byte_len as usize;
+    let sizes_end = sizes_start + sizes_byte_len;
 
     let sizes_data = &payload[sizes_start..sizes_end];
     let values_start = sizes_end;
@@ -363,6 +372,8 @@ fn decode_uncompressed(
     // parsing sizes (matching the C++ decoder): fail fast the moment the
     // running total exceeds the claim, and require exact equality at the
     // end. Decoded output can then never exceed the validated header claim.
+    // This also makes the `as usize` casts below safe: each size fits in
+    // decoded_data_size, which was checked to fit in usize.
     let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if pos >= sizes_data.len() {
@@ -447,14 +458,12 @@ fn decode_compressed(
         RiegeliError::MalformedData(format!("failed to read sizes_blob_len: {e}").into())
     })?;
     pos += consumed;
-    let sizes_blob_len = sizes_blob_len as usize;
 
-    // checked_add: sizes_blob_len is attacker-claimed; a wrapping add here
-    // would let the truncation check pass and the slice below panic.
-    let sizes_blob_end = pos
-        .checked_add(sizes_blob_len)
-        .ok_or_else(|| RiegeliError::MalformedData("sizes blob length overflows".into()))?;
-    if sizes_blob_end > payload.len() {
+    // Compare in u64: sizes_blob_len is attacker-claimed, and on a 32-bit
+    // target an `as usize` cast of a >4 GiB claim would truncate and let
+    // the truncation check pass with the wrong length (and the slice below
+    // panic).
+    if sizes_blob_len > (payload.len() - pos) as u64 {
         return Err(RiegeliError::MalformedData(
             format!(
                 "sizes blob truncated: need {sizes_blob_len} bytes at offset {pos}, \
@@ -464,6 +473,8 @@ fn decode_compressed(
             .into(),
         ));
     }
+    let sizes_blob_len = sizes_blob_len as usize;
+    let sizes_blob_end = pos + sizes_blob_len;
 
     let sizes_blob = &payload[pos..sizes_blob_end];
     pos = sizes_blob_end;
@@ -472,15 +483,15 @@ fn decode_compressed(
     let (uncompressed_sizes_len, consumed2) = decode_u64(sizes_blob).map_err(|e| {
         RiegeliError::MalformedData(format!("failed to read uncompressed_sizes_len: {e}").into())
     })?;
-    let uncompressed_sizes_len = uncompressed_sizes_len as usize;
     let compressed_sizes = &sizes_blob[consumed2..];
 
     // The sizes section holds one varint per record (at most 10 bytes
     // each), so its decompressed length is structurally bounded by the
     // record count — reject oversized claims before decompressing, and
-    // cap the decompression at the claim.
+    // cap the decompression at the claim. Compare in u64 so a >4 GiB
+    // claim cannot wrap through a usize cast on a 32-bit target.
     let max_sizes_len = (num_records as u64).saturating_mul(10);
-    if uncompressed_sizes_len as u64 > max_sizes_len {
+    if uncompressed_sizes_len > max_sizes_len {
         return Err(RiegeliError::MalformedData(
             format!(
                 "claimed sizes length {uncompressed_sizes_len} exceeds {max_sizes_len} \
@@ -490,8 +501,8 @@ fn decode_compressed(
         ));
     }
     let sizes_bytes =
-        decompress_data_capped(compressed_sizes, compression, uncompressed_sizes_len as u64)?;
-    if sizes_bytes.len() != uncompressed_sizes_len {
+        decompress_data_capped(compressed_sizes, compression, uncompressed_sizes_len)?;
+    if sizes_bytes.len() as u64 != uncompressed_sizes_len {
         return Err(RiegeliError::MalformedData(
             format!(
                 "decompressed sizes length {} != expected {}",
@@ -511,7 +522,9 @@ fn decode_compressed(
     // path. The budget is applied to the parsed sizes BEFORE the values
     // blob is decompressed, and the values decompression below is capped
     // at decoded_data_size, so a values-blob decompression bomb cannot
-    // materialize more than the hash-validated header claim.
+    // materialize more than the hash-validated header claim. This also
+    // makes the `as usize` casts below safe: each size fits in
+    // decoded_data_size, which was checked to fit in usize.
     let mut decoded_total: u64 = 0;
     for i in 0..num_records {
         if spos >= sizes_bytes.len() {
@@ -1495,6 +1508,77 @@ mod tests {
         for _ in 0..5 {
             assert!(decoder.read_record().unwrap().is_none());
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Header size-claim enforcement (C++ SimpleDecoder::Decode semantics)
+    // -------------------------------------------------------------------------
+
+    /// Rebuild a chunk's header with a different decoded_data_size claim,
+    /// recomputing the hashes so only the size claim is wrong.
+    fn with_decoded_data_size(chunk: Chunk, decoded_data_size: u64) -> Chunk {
+        let header = ChunkHeader::from_parts(
+            &chunk.data,
+            ChunkType::Simple,
+            chunk.header.num_records(),
+            decoded_data_size,
+        );
+        Chunk {
+            header,
+            data: chunk.data,
+        }
+    }
+
+    /// C++ fails with "Decoded data size smaller than expected" when the sum
+    /// of record sizes is smaller than the header's decoded_data_size claim.
+    #[test]
+    fn decoded_data_size_larger_than_records_rejected() {
+        let mut encoder = SimpleChunkEncoder::new();
+        encoder.add_record(b"hello");
+        let chunk = encoder.encode().expect("encode ok");
+        let chunk = with_decoded_data_size(chunk, 6); // actual total is 5
+        let result = SimpleChunkDecoder::new(chunk);
+        assert!(
+            result.is_err(),
+            "decoded_data_size larger than the actual record total must be rejected"
+        );
+    }
+
+    /// C++ fails with "Decoded data size larger than expected" when a record
+    /// size exceeds the remaining decoded_data_size budget.
+    #[test]
+    fn decoded_data_size_smaller_than_records_rejected() {
+        let mut encoder = SimpleChunkEncoder::new();
+        encoder.add_record(b"hello");
+        let chunk = encoder.encode().expect("encode ok");
+        let chunk = with_decoded_data_size(chunk, 4); // actual total is 5
+        let result = SimpleChunkDecoder::new(chunk);
+        assert!(
+            result.is_err(),
+            "record sizes exceeding decoded_data_size must be rejected"
+        );
+    }
+
+    /// Same enforcement on the compressed path.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_decoded_data_size_mismatch_rejected() {
+        let mut encoder = SimpleChunkEncoder::with_compression(CompressionType::Zstd);
+        encoder.add_record(b"hello");
+        encoder.add_record(b"world");
+        let chunk = encoder.encode().expect("encode ok");
+
+        let too_large = with_decoded_data_size(chunk.clone(), 11); // actual total is 10
+        assert!(
+            SimpleChunkDecoder::new(too_large).is_err(),
+            "decoded_data_size larger than the actual record total must be rejected"
+        );
+
+        let too_small = with_decoded_data_size(chunk, 9);
+        assert!(
+            SimpleChunkDecoder::new(too_small).is_err(),
+            "record sizes exceeding decoded_data_size must be rejected"
+        );
     }
 
     /// Bit flip in compressed data is caught by the data hash check.
