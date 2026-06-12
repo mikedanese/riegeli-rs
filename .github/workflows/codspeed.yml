@@ -1,0 +1,46 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # CodSpeed authenticates public-repo uploads via OIDC; no token needed.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-codspeed-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed --locked
+
+      - name: Build benchmarks
+        # Only the pure-Rust benches are measured. head_to_head benchmarks the
+        # C++ reference through riegeli-ffi (a slow C++ build) and is excluded.
+        run: >
+          cargo codspeed build -p riegeli
+          --features brotli,zstd,snappy
+          --bench throughput
+          --bench transpose_projection_bench
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: cargo codspeed run

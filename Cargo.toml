@@ -34,4 +34,8 @@ blake2 = "0.10"
 # Dev deps
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+# CodSpeed instrumentation for continuous benchmarking in CI. The benches only
+# use it when built by `cargo codspeed build` (which sets --cfg codspeed);
+# plain `cargo bench` keeps using the real criterion crate above.
+codspeed-criterion-compat = "4.7"
 pprof = { version = "0.15", features = ["criterion", "protobuf-codec"] }

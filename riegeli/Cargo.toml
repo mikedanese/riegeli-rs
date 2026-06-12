@@ -40,7 +40,9 @@ snap = { workspace = true, optional = true }
 
 [lints.rust]
 # cargo-fuzz builds pass --cfg fuzzing to expose the fuzz entry points.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+# cargo-codspeed builds pass --cfg codspeed; the benches use it to swap
+# criterion for the CodSpeed compatibility layer.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(codspeed)"] }
 
 [features]
 default = ["zstd"]
@@ -51,6 +53,7 @@ snappy = ["dep:snap"]
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+codspeed-criterion-compat = { workspace = true }
 pprof = { workspace = true }
 riegeli-ffi = { path = "../riegeli-ffi" }
 

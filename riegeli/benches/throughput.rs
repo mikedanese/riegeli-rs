@@ -29,7 +29,18 @@
 
 use std::io::Cursor;
 
+// Under `cargo codspeed build` (which sets --cfg codspeed) the benchmarks are
+// compiled against the CodSpeed compatibility layer instead of criterion
+// proper. The pprof flamegraph profiler only exists in the regular criterion
+// build: it implements criterion's `Profiler` trait, which the compatibility
+// layer does not provide (and instrumented runs have no use for it anyway).
+#[cfg(codspeed)]
+use codspeed_criterion_compat::{
+    Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+};
+#[cfg(not(codspeed))]
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+#[cfg(not(codspeed))]
 use pprof::criterion::{Output, PProfProfiler};
 
 use riegeli::{CompressionType, ReaderOptions, RecordReader, RecordWriter, WriterOptions};
@@ -295,10 +306,22 @@ fn bench_projection_placeholder(c: &mut Criterion) {
 // Criterion setup with pprof flamegraph profiler
 // ---------------------------------------------------------------------------
 
+#[cfg(not(codspeed))]
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(1000, Output::Protobuf));
     targets = bench_write, bench_read, bench_projection_placeholder
 }
+
+// CodSpeed builds skip the profiler: instrumented runs measure via the
+// CodSpeed runner, not pprof.
+#[cfg(codspeed)]
+criterion_group!(
+    benches,
+    bench_write,
+    bench_read,
+    bench_projection_placeholder
+);
+
 criterion_main!(benches);
