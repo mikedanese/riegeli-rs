@@ -8,7 +8,7 @@
 )]
 use riegeli::{CompressionType, ReaderOptions, RecordReader, RecordWriter, WriterOptions};
 
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{Cursor, Write};
 
 // ---------------------------------------------------------------------------
 // Helpers

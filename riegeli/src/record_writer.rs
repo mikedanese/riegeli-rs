@@ -806,7 +806,7 @@ mod tests {
 
         while pos < file_data.len() {
             // Skip block header if at block boundary
-            if pos % BLOCK_SIZE as usize == 0 {
+            if pos.is_multiple_of(BLOCK_SIZE as usize) {
                 pos += BLOCK_HEADER_SIZE as usize;
                 if pos >= file_data.len() {
                     break;
@@ -830,7 +830,7 @@ mod tests {
             let mut chunk_data = Vec::with_capacity(data_size);
             let mut remaining = data_size;
             while remaining > 0 {
-                if pos % BLOCK_SIZE as usize == 0 {
+                if pos.is_multiple_of(BLOCK_SIZE as usize) {
                     pos += BLOCK_HEADER_SIZE as usize;
                 }
                 let space = (BLOCK_SIZE as usize - (pos % BLOCK_SIZE as usize)).min(remaining);
@@ -1220,7 +1220,7 @@ mod tests {
         .expect("reader new ok");
         let mut count = 0usize;
         let mut last_begin = 0;
-        while let Some(_) = reader.read_record().expect("read ok") {
+        while reader.read_record().expect("read ok").is_some() {
             count += 1;
             last_begin = reader.last_pos().chunk_begin;
         }

@@ -15,11 +15,9 @@ use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 
 use riegeli::proto::{
-    DynamicHandlerSet, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter,
+    extract_varint_column, filter_fields_to_writer, for_each_proto_record, StreamError,
 };
-use riegeli::proto::{
-    StreamError, extract_varint_column, filter_fields_to_writer, for_each_proto_record,
-};
+use riegeli::proto::{DynamicHandlerSet, ProtoField, ProtoFieldIter, SerializedMessageWriter};
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, WriterOptions};
 use riegeli_ffi::{
     Compression, RecordReader as FfiReader, RecordWriter as FfiWriter,
@@ -100,12 +98,13 @@ fn eval_29_empty_file_filter_fields() {
 #[test]
 fn eval_29_mixed_records_for_each() {
     // Interleave: non-proto, proto, non-proto, proto, non-proto
-    let mut records = Vec::new();
-    records.push(b"not a proto".to_vec()); // 0: non-proto
-    records.push(build_test_message(100)); // 1: proto
-    records.push(vec![0xFF, 0xFF, 0xFF]); // 2: non-proto (invalid tag)
-    records.push(build_test_message(200)); // 3: proto
-    records.push(b"also not proto".to_vec()); // 4: non-proto
+    let records = vec![
+        b"not a proto".to_vec(),    // 0: non-proto
+        build_test_message(100),    // 1: proto
+        vec![0xFF, 0xFF, 0xFF],     // 2: non-proto (invalid tag)
+        build_test_message(200),    // 3: proto
+        b"also not proto".to_vec(), // 4: non-proto
+    ];
 
     let file_bytes = rust_write_records(&records, WriterOptions::new());
     let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
@@ -246,12 +245,13 @@ fn eval_29_filter_all_fields_unmatched() {
 fn eval_29_record_index_with_non_proto_gaps() {
     // Mix: [non-proto, proto(0), non-proto, proto(1), proto(2)]
     // Error at proto value=1, which is record index 3
-    let mut records = Vec::new();
-    records.push(b"text".to_vec()); // 0
-    records.push(build_test_message(0)); // 1
-    records.push(b"text2".to_vec()); // 2
-    records.push(build_test_message(1)); // 3 -- error here
-    records.push(build_test_message(2)); // 4
+    let records = vec![
+        b"text".to_vec(),      // 0
+        build_test_message(0), // 1
+        b"text2".to_vec(),     // 2
+        build_test_message(1), // 3 -- error here
+        build_test_message(2), // 4
+    ];
 
     let file_bytes = rust_write_records(&records, WriterOptions::new());
     let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();
@@ -370,10 +370,11 @@ fn eval_29_for_each_empty_proto_records() {
 
 #[test]
 fn eval_29_filter_non_proto_passthrough() {
-    let mut records = Vec::new();
-    records.push(build_test_message(1));
-    records.push(b"plain text record".to_vec());
-    records.push(build_test_message(2));
+    let records = vec![
+        build_test_message(1),
+        b"plain text record".to_vec(),
+        build_test_message(2),
+    ];
 
     let file_bytes = rust_write_records(&records, WriterOptions::new());
     let mut output_buf = Cursor::new(Vec::new());
@@ -434,10 +435,11 @@ fn eval_29_stream_error_source_chain() {
 
 #[test]
 fn eval_29_transpose_filter_with_non_proto_mix() {
-    let mut records = Vec::new();
-    records.push(build_test_message(10));
-    records.push(b"not proto".to_vec());
-    records.push(build_test_message(20));
+    let records = vec![
+        build_test_message(10),
+        b"not proto".to_vec(),
+        build_test_message(20),
+    ];
 
     let file_bytes = rust_write_records(&records, WriterOptions::new().transpose(true));
     let mut output_buf = Cursor::new(Vec::new());

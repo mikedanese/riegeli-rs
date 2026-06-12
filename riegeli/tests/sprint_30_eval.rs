@@ -30,6 +30,7 @@ fn encode_varint(v: u64) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 fn encode_varint_field(field_number: u32, value: u64) -> Vec<u8> {
     let tag = (field_number << 3) | 0;
     let mut out = encode_varint(tag as u64);
@@ -171,7 +172,7 @@ fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
 
 #[test]
 fn eval_30_1_narrow_projection_multi_bucket() {
-    let records: Vec<Vec<u8>> = (0..200u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..200u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -186,7 +187,7 @@ fn eval_30_1_narrow_projection_multi_bucket() {
     assert_eq!(results.len(), 200);
     for (i, rec) in results.iter().enumerate() {
         let val = find_varint_field(rec, 1).expect("field 1 present");
-        assert_eq!(val, (i as u64) * 1 + 1, "field 1 value mismatch at {i}");
+        assert_eq!(val, (i as u64) + 1, "field 1 value mismatch at {i}");
     }
 }
 
@@ -196,7 +197,7 @@ fn eval_30_1_narrow_projection_multi_bucket() {
 
 #[test]
 fn eval_30_2_non_projected_byte_identical_multi_bucket() {
-    let records: Vec<Vec<u8>> = (0..50u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..50u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -214,7 +215,7 @@ fn eval_30_2_non_projected_byte_identical_multi_bucket() {
 
 #[test]
 fn eval_30_2_field_projection_all_byte_identical() {
-    let records: Vec<Vec<u8>> = (0..30u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..30u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -240,7 +241,7 @@ fn eval_30_2_field_projection_all_byte_identical() {
 
 #[test]
 fn eval_30_4_single_bucket_no_regression() {
-    let records: Vec<Vec<u8>> = (0..20u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..20u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -260,7 +261,7 @@ fn eval_30_4_single_bucket_no_regression() {
     assert_eq!(results_proj.len(), 20);
     for (i, rec) in results_proj.iter().enumerate() {
         let val = find_varint_field(rec, 1).expect("field 1 present");
-        assert_eq!(val, (i as u64) * 1 + 1, "single-bucket field 1 at {i}");
+        assert_eq!(val, (i as u64) + 1, "single-bucket field 1 at {i}");
         // Should not have field 6 (fixed32)
         assert!(
             find_varint_field(rec, 6).is_none(),
@@ -321,7 +322,7 @@ fn eval_30_5_pruned_buffer_undecompressed_bucket() {
     // will likely be in a different bucket than field 15's data buffer.
     // Projecting only field 15 should work even though field 1's bucket
     // is never decompressed.
-    let records: Vec<Vec<u8>> = (0..50u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..50u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -348,7 +349,7 @@ fn eval_30_5_pruned_buffer_undecompressed_bucket() {
 
 #[test]
 fn eval_30_6_empty_projection_returns_empty_records() {
-    let records: Vec<Vec<u8>> = (0..10u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..10u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -375,7 +376,7 @@ fn eval_30_6_empty_projection_returns_empty_records() {
 
 #[test]
 fn eval_adv_project_each_field_individually() {
-    let records: Vec<Vec<u8>> = (0..30u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..30u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -406,7 +407,7 @@ fn eval_adv_project_each_field_individually() {
 
 #[test]
 fn eval_adv_project_two_nonadjacent_fields() {
-    let records: Vec<Vec<u8>> = (0..100u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..100u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -423,7 +424,7 @@ fn eval_adv_project_two_nonadjacent_fields() {
     assert_eq!(results.len(), 100);
     for (i, rec) in results.iter().enumerate() {
         let v1 = find_varint_field(rec, 1).expect("field 1 present");
-        assert_eq!(v1, (i as u64) * 1 + 1);
+        assert_eq!(v1, (i as u64) + 1);
         let v11 = find_varint_field(rec, 11);
         assert!(v11.is_some(), "field 11 missing at record {i}");
         let expected_11 = (i as u64).wrapping_mul(11);
@@ -472,7 +473,7 @@ fn eval_adv_large_volume_narrow_projection() {
 #[test]
 #[cfg(feature = "brotli")]
 fn eval_adv_brotli_multi_bucket_projection() {
-    let records: Vec<Vec<u8>> = (0..100u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..100u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -492,7 +493,7 @@ fn eval_adv_brotli_multi_bucket_projection() {
     assert_eq!(results_proj.len(), 100);
     for (i, rec) in results_proj.iter().enumerate() {
         let val = find_varint_field(rec, 1).expect("field 1 present");
-        assert_eq!(val, (i as u64) * 1 + 1, "brotli projected field 1 at {i}");
+        assert_eq!(val, (i as u64) + 1, "brotli projected field 1 at {i}");
     }
 }
 
@@ -503,7 +504,7 @@ fn eval_adv_brotli_multi_bucket_projection() {
 #[test]
 #[cfg(feature = "zstd")]
 fn eval_adv_zstd_multi_bucket_projection() {
-    let records: Vec<Vec<u8>> = (0..80u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..80u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()
@@ -534,7 +535,7 @@ fn eval_adv_zstd_multi_bucket_projection() {
 
 #[test]
 fn eval_adv_projected_matches_full_decode_then_filter() {
-    let records: Vec<Vec<u8>> = (0..100u64).map(|i| make_wide_record(i)).collect();
+    let records: Vec<Vec<u8>> = (0..100u64).map(make_wide_record).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
 
     let opts = WriterOptions::new()

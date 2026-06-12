@@ -7,9 +7,9 @@
     allow(unused_imports)
 )]
 use riegeli::proto::{
-    DynamicHandlerSet, FieldHandler, FieldValue, FilteredFieldIter, HandleField, ProtoField,
-    ProtoFieldIter, SerializedMessageWriter, StaticHandlerSet, WireType, copy_fields, read_message,
-    serialize_field,
+    copy_fields, read_message, serialize_field, DynamicHandlerSet, FieldHandler, FieldValue,
+    FilteredFieldIter, ProtoField, ProtoFieldIter, SerializedMessageWriter, StaticHandlerSet,
+    WireType,
 };
 
 // ---------------------------------------------------------------------------

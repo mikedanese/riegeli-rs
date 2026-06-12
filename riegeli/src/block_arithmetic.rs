@@ -21,7 +21,11 @@ pub fn round_down_to_block_boundary(pos: u64) -> u64 {
 /// Returns `0` when `pos` is exactly at a block boundary (including `pos == 0`).
 pub fn remaining_in_block(pos: u64) -> u64 {
     let offset = pos % BLOCK_SIZE;
-    if offset == 0 { 0 } else { BLOCK_SIZE - offset }
+    if offset == 0 {
+        0
+    } else {
+        BLOCK_SIZE - offset
+    }
 }
 
 /// The usable (non-block-header) bytes per block.
@@ -35,6 +39,7 @@ pub const USABLE_BLOCK_SIZE: u64 = BLOCK_SIZE - BLOCK_HEADER_SIZE;
 /// block header is addressed AT the block boundary (offset 0), and offset 24
 /// — the first physical byte after the header — is excluded as an alias of
 /// that same position.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_possible_chunk_boundary(pos: u64) -> bool {
     remaining_in_block(pos) < USABLE_BLOCK_SIZE
 }

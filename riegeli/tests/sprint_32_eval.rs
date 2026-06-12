@@ -337,7 +337,7 @@ fn eval_32_4_mixed_types_narrow_projection() {
             let mut r = encode_varint_field(1, i);
             r.extend(encode_fixed32_field(2, i as u32));
             r.extend(encode_fixed64_field(3, i * 1000));
-            r.extend(encode_bytes_field(4, &vec![0xAA; 50]));
+            r.extend(encode_bytes_field(4, &[0xAA; 50]));
             r.extend(encode_varint_field(5, i + 500));
             r.extend(encode_fixed32_field(6, 0xDEADBEEF));
             r.extend(encode_bytes_field(
@@ -585,7 +585,7 @@ fn eval_32_edge_brotli_projection() {
         .map(|i| {
             let mut r = encode_varint_field(1, i);
             r.extend(encode_fixed32_field(2, i as u32));
-            r.extend(encode_bytes_field(3, &vec![0xBB; 20]));
+            r.extend(encode_bytes_field(3, &[0xBB; 20]));
             r
         })
         .collect();

@@ -11,8 +11,8 @@ mod common;
 use std::io::Cursor;
 
 use riegeli::proto::{
-    DynamicHandlerSet, FieldValue, FilteredFieldIter, HandleField, ProtoField, ProtoFieldIter,
-    SerializedMessageWriter, copy_fields, is_proto_message, read_message,
+    DynamicHandlerSet, FieldValue, ProtoField, ProtoFieldIter, SerializedMessageWriter,
+    is_proto_message,
 };
 use riegeli::proto::{
     StreamError, extract_varint_column, filter_fields_to_writer, for_each_proto_record,
@@ -92,10 +92,10 @@ fn criterion_29_1_columnar_extraction_matches_manual_deserialization() {
     for rec in &records {
         for field in ProtoFieldIter::new(rec) {
             let field = field.unwrap();
-            if field.field_number == 1 {
-                if let FieldValue::Varint(v) = field.value {
-                    manual_values.push(v);
-                }
+            if field.field_number == 1
+                && let FieldValue::Varint(v) = field.value
+            {
+                manual_values.push(v);
             }
         }
     }
@@ -258,17 +258,13 @@ fn criterion_29_4_non_proto_records_fallback() {
     use std::cell::RefCell;
 
     // Write a mix of proto and non-proto records.
-    let mut all_records = Vec::new();
-    // Record 0: valid proto
-    all_records.push(build_test_message(0));
-    // Record 1: non-proto (just plain text)
-    all_records.push(b"hello world, not a proto".to_vec());
-    // Record 2: valid proto
-    all_records.push(build_test_message(2));
-    // Record 3: non-proto (invalid wire format: wire type 6)
-    all_records.push(vec![0x0E, 0x01]);
-    // Record 4: valid proto
-    all_records.push(build_test_message(4));
+    let all_records = vec![
+        build_test_message(0),                // 0: valid proto
+        b"hello world, not a proto".to_vec(), // 1: non-proto (just plain text)
+        build_test_message(2),                // 2: valid proto
+        vec![0x0E, 0x01],                     // 3: non-proto (invalid wire format: wire type 6)
+        build_test_message(4),                // 4: valid proto
+    ];
 
     let file_bytes = rust_write_records(&all_records, WriterOptions::new());
 
@@ -299,9 +295,7 @@ fn criterion_29_4_non_proto_records_fallback() {
 fn criterion_29_4_non_proto_skipped_without_fallback() {
     use std::cell::Cell;
 
-    let mut all_records = Vec::new();
-    all_records.push(build_test_message(42));
-    all_records.push(b"not proto".to_vec());
+    let all_records = vec![build_test_message(42), b"not proto".to_vec()];
 
     let file_bytes = rust_write_records(&all_records, WriterOptions::new());
     let mut reader = RecordReader::new(Cursor::new(&file_bytes), ReaderOptions::new()).unwrap();

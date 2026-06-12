@@ -105,7 +105,7 @@ fn read_projected(data: &[u8], proj: &FieldProjection) -> Vec<Vec<u8>> {
 #[test]
 fn eval_31_2_projection_single_field_record() {
     let record = encode_varint_field(1, 150);
-    let data = write_transpose(&[record.clone()], CompressionType::None);
+    let data = write_transpose(std::slice::from_ref(&record), CompressionType::None);
 
     let no_proj = read_all(&data);
     let proj = FieldProjection::new().add_field(Field::new(vec![1]));
@@ -203,7 +203,7 @@ fn eval_31_6_nested_submessage_projection_field1_only() {
     let inner = encode_varint_field(3, 7);
     let mut record = encode_varint_field(1, 42);
     record.extend(encode_submessage_field(2, &inner));
-    let data = write_transpose(&[record.clone()], CompressionType::None);
+    let data = write_transpose(std::slice::from_ref(&record), CompressionType::None);
 
     let proj = FieldProjection::new().add_field(Field::new(vec![1]));
     let result = read_projected(&data, &proj);
