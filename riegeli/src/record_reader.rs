@@ -1066,11 +1066,11 @@ impl<R: Read + Seek> RecordReader<R> {
             // (hash-valid header, stream-bounded claims): skip exactly it.
             Some(end) => end,
             // Header unreadable, hash-invalid, claims unvalidated, or I/O
-            // failure: nothing about the extent can be trusted — resync at
-            // the next block boundary, clamped to the stream length (a
-            // region cannot extend past the file — except by the minimal
-            // progress margin when corruption sits at EOF — and C++
-            // reports EOF-ended regions the same way).
+            // failure: nothing about the extent can be trusted — resync via
+            // the next block boundary's header, clamped to the stream
+            // length (a region cannot extend past the file — except by the
+            // minimal progress margin when corruption sits at EOF — and
+            // C++ reports EOF-ended regions the same way).
             None => {
                 let boundary = next_block_boundary(begin);
                 let boundary = if boundary == begin {
@@ -1078,7 +1078,8 @@ impl<R: Read + Seek> RecordReader<R> {
                 } else {
                     boundary
                 };
-                boundary.min(self.stream_len.max(begin))
+                self.resolve_boundary_resync(boundary)
+                    .min(self.stream_len.max(begin))
             }
         };
         // Forward progress no matter what the arithmetic said — measured
@@ -1105,6 +1106,62 @@ impl<R: Read + Seek> RecordReader<R> {
         let cb = self.recovery.as_mut().expect("checked above");
         let region_ref = self.last_skipped_region.as_ref().expect("just set");
         Some(cb(region_ref))
+    }
+
+    /// Resolve the resync position for an untrusted failure, starting from
+    /// `boundary` (a block boundary strictly after the failed region's
+    /// begin). Mirrors the C++ `DefaultChunkReaderBase::Recover` kFindChunk
+    /// path: chunks do not generally start at block boundaries — after the
+    /// boundary's 24-byte block header, the bytes are normally the TAIL of
+    /// a chunk spanning the boundary — so the block header's `next_chunk`
+    /// pointer is followed to land exactly on the next chunk start.
+    /// `previous_chunk == 0` means a chunk begins at the boundary itself.
+    /// A hash-invalid block header or an implausible pointer pushes the
+    /// walk to the next boundary; EOF ends the walk (the caller clamps the
+    /// result to the stream length).
+    ///
+    /// Only the underlying reader's physical position moves; all logical
+    /// state is untouched (report-only callers rely on that, and every
+    /// read path re-seeks explicitly).
+    fn resolve_boundary_resync(&mut self, mut boundary: u64) -> u64 {
+        loop {
+            if self.reader.seek(SeekFrom::Start(boundary)).is_err() {
+                return boundary;
+            }
+            let mut bh_bytes = [0u8; 24]; // BLOCK_HEADER_SIZE
+            let n = match read_full(&mut self.reader, &mut bh_bytes) {
+                Ok(n) => n,
+                Err(_) => return boundary,
+            };
+            if n < bh_bytes.len() {
+                // EOF at or inside the boundary's block header: the region
+                // runs to the end of the stream.
+                return boundary;
+            }
+            let bh = BlockHeader::from_bytes(bh_bytes);
+            if !bh.is_valid() {
+                // Untrustworthy block header: try the next boundary
+                // (C++ goes back to find_chunk).
+                boundary += BLOCK_SIZE;
+                continue;
+            }
+            if bh.previous_chunk() == 0 {
+                // A chunk boundary coincides with the block boundary.
+                return boundary;
+            }
+            let target = boundary.saturating_add(bh.next_chunk());
+            if target > self.stream_len {
+                // Past the end of the stream; the caller clamps to EOF
+                // (C++: the resync seek fails and the region ends there).
+                return target;
+            }
+            if crate::block_arithmetic::is_possible_chunk_boundary(target) {
+                return target;
+            }
+            // Implausible pointer (lands inside a block header): continue
+            // from the next boundary after it (C++ goto find_chunk).
+            boundary = next_block_boundary(target);
+        }
     }
 
     fn try_recover_at(&mut self, at: u64, error: &RiegeliError) -> bool {
@@ -2934,6 +2991,74 @@ mod tests {
             regions[0].end(),
             BLOCK_SIZE + 25,
             "minimal progress margin: one byte past the 24-byte corrupt tail"
+        );
+    }
+
+    /// An untrusted failure resyncs at a block boundary — but chunks do not
+    /// generally START at boundaries: the bytes after the boundary's block
+    /// header are normally the tail of a chunk spanning it. The block
+    /// header's next_chunk pointer exists precisely so a reader landing at
+    /// a boundary can find the next chunk start, and C++ Recover follows
+    /// it (pos_ += block_header_.next_chunk()). Resuming AT the boundary
+    /// instead made every subsequent block parse mid-chunk bytes as a
+    /// header, cascade new regions, and silently skip the whole rest of
+    /// the file.
+    #[test]
+    fn recovery_resync_follows_block_header_next_chunk() {
+        let n = 6;
+        let rec_size = 16320usize;
+        // Prefix lengths give every chunk's begin (flush-per-record output
+        // is deterministic, so shorter runs are prefixes of longer ones).
+        let lens: Vec<u64> = (0..=n)
+            .map(|k| write_chunks_past_first_block(rec_size, k).len() as u64)
+            .collect();
+        let mut data = write_chunks_past_first_block(rec_size, n);
+        assert!(
+            data.len() as u64 > BLOCK_SIZE,
+            "file must span the first block boundary"
+        );
+        // The chunk containing the first boundary (it does not start there).
+        let c = (0..n)
+            .find(|&k| lens[k] < BLOCK_SIZE && BLOCK_SIZE < lens[k + 1])
+            .expect("some chunk must straddle the boundary");
+        assert!(c >= 2, "need a chunk to corrupt before the straddler");
+
+        // Corrupt chunk 1's HEADER hash: an untrusted failure at lens[1].
+        data[lens[1] as usize] ^= 0xFF;
+
+        let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
+        let rc = Rc::clone(&regions);
+        let opts = ReaderOptions::new().recovery(move |region| {
+            rc.borrow_mut().push(region.clone());
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
+
+        let mut got = Vec::new();
+        while let Some(rec) = reader.read_record().expect("read ok") {
+            got.push(rec[0]);
+        }
+
+        // Record 0 reads normally; the skip resumes at the chunk AFTER the
+        // straddler (boundary + next_chunk), recovering records c+1..n.
+        let mut expected = vec![0u8];
+        expected.extend((c + 1..n).map(|i| (i % 251) as u8));
+        assert_eq!(
+            got, expected,
+            "records after the boundary resync must be recovered"
+        );
+
+        let regions = regions.borrow();
+        assert_eq!(regions.len(), 1, "exactly one region, no cascade");
+        assert_eq!(
+            regions[0].begin(),
+            lens[1],
+            "region begins at the bad chunk"
+        );
+        assert_eq!(
+            regions[0].end(),
+            lens[c + 1],
+            "region ends at boundary + next_chunk (the next real chunk start)"
         );
     }
 
