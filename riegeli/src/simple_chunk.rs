@@ -393,6 +393,18 @@ fn decode_uncompressed(
             })?;
         sizes.push(size as usize);
     }
+    // C++ sizes_decompressor.VerifyEndAndClose(): the sizes section must be
+    // exactly consumed by the num_records size varints.
+    if pos != sizes_data.len() {
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "trailing data in sizes section: {} of {} bytes consumed",
+                pos,
+                sizes_data.len()
+            )
+            .into(),
+        ));
+    }
     if decoded_total != decoded_data_size {
         return Err(RiegeliError::MalformedData(
             "decoded data size smaller than expected".into(),
@@ -411,6 +423,17 @@ fn decode_uncompressed(
             format!(
                 "values section truncated: need {total_values_len} bytes but only {} available",
                 payload.len() - values_start
+            )
+            .into(),
+        ));
+    }
+    // C++ src.VerifyEndAndClose() in ChunkDecoder::Parse: the chunk data must
+    // end exactly where the values section ends.
+    if values_end < payload.len() {
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "trailing data after values section: {} extra bytes",
+                payload.len() - values_end
             )
             .into(),
         ));
@@ -543,6 +566,18 @@ fn decode_compressed(
                 RiegeliError::MalformedData("decoded data size larger than expected".into())
             })?;
         sizes.push(size as usize);
+    }
+    // C++ sizes_decompressor.VerifyEndAndClose(): the decompressed sizes
+    // section must be exactly consumed by the num_records size varints.
+    if spos != sizes_bytes.len() {
+        return Err(RiegeliError::MalformedData(
+            format!(
+                "trailing data in sizes section: {} of {} bytes consumed",
+                spos,
+                sizes_bytes.len()
+            )
+            .into(),
+        ));
     }
     if decoded_total != decoded_data_size {
         return Err(RiegeliError::MalformedData(
@@ -1578,6 +1613,69 @@ mod tests {
         assert!(
             SimpleChunkDecoder::new(too_small).is_err(),
             "record sizes exceeding decoded_data_size must be rejected"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Exact section consumption (C++ VerifyEndAndClose semantics)
+    // -------------------------------------------------------------------------
+
+    /// C++ rejects a sizes section that is longer than its num_records varints
+    /// (sizes_decompressor.VerifyEndAndClose in SimpleDecoder::Decode).
+    #[test]
+    fn trailing_bytes_in_sizes_section_rejected() {
+        // compression=0x00, sizes_byte_len=2, size varint 5 + 1 stray byte, "hello"
+        let data: Vec<u8> = vec![0x00, 0x02, 0x05, 0x00, b'h', b'e', b'l', b'l', b'o'];
+        let header = ChunkHeader::from_parts(&data, ChunkType::Simple, 1, 5);
+        let chunk = Chunk { header, data };
+        assert!(
+            SimpleChunkDecoder::new(chunk).is_err(),
+            "stray bytes after the size varints must be rejected"
+        );
+    }
+
+    /// C++ rejects chunk data that continues past the values section
+    /// (src.VerifyEndAndClose in ChunkDecoder::Parse).
+    #[test]
+    fn trailing_bytes_after_values_section_rejected() {
+        // compression=0x00, sizes_byte_len=1, size varint 5, "hello", 1 stray byte
+        let data: Vec<u8> = vec![0x00, 0x01, 0x05, b'h', b'e', b'l', b'l', b'o', 0xAA];
+        let header = ChunkHeader::from_parts(&data, ChunkType::Simple, 1, 5);
+        let chunk = Chunk { header, data };
+        assert!(
+            SimpleChunkDecoder::new(chunk).is_err(),
+            "stray bytes after the values section must be rejected"
+        );
+    }
+
+    /// Same sizes-section enforcement on the compressed path.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_trailing_bytes_in_sizes_section_rejected() {
+        use crate::compression::{CompressOptions, compress_zstd};
+        use crate::varint::length_varint_u64;
+
+        // Sizes section for 1 record of 5 bytes, plus 1 stray byte.
+        let sizes_section: &[u8] = &[0x05, 0x00];
+        let compressed_sizes = compress_zstd(sizes_section, CompressOptions::default()).unwrap();
+        let compressed_values = compress_zstd(b"hello", CompressOptions::default()).unwrap();
+
+        let sizes_blob_len =
+            length_varint_u64(sizes_section.len() as u64) as u64 + compressed_sizes.len() as u64;
+
+        let mut data: Vec<u8> = Vec::new();
+        data.push(b'z');
+        data.extend_from_slice(&encode_u64(sizes_blob_len));
+        data.extend_from_slice(&encode_u64(sizes_section.len() as u64));
+        data.extend_from_slice(&compressed_sizes);
+        data.extend_from_slice(&encode_u64(5));
+        data.extend_from_slice(&compressed_values);
+
+        let header = ChunkHeader::from_parts(&data, ChunkType::Simple, 1, 5);
+        let chunk = Chunk { header, data };
+        assert!(
+            SimpleChunkDecoder::new(chunk).is_err(),
+            "stray bytes after the size varints must be rejected"
         );
     }
 
