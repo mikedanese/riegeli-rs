@@ -1244,11 +1244,18 @@ impl TransposeChunkEncoder {
     }
 
     /// Encode an empty (zero-record) transposed chunk.
+    ///
+    /// Matches the C++ encoder, whose `CreateStateMachine` emits a single
+    /// `kNoOp` state when there are no encoded tags; a chunk with an empty
+    /// state machine would be rejected by the decoder (`first_node` is
+    /// always out of range when `num_states == 0`).
     fn encode_empty(&self) -> Result<Chunk, RiegeliError> {
         let mut header: Vec<u8> = Vec::new();
         header.extend_from_slice(&encode_u32(0)); // num_buckets
         header.extend_from_slice(&encode_u32(0)); // num_buffers
-        header.extend_from_slice(&encode_u32(0)); // num_states
+        header.extend_from_slice(&encode_u32(1)); // num_states
+        header.extend_from_slice(&encode_u32(0)); // state 0 tag: kNoOp
+        header.extend_from_slice(&encode_u32(0)); // state 0 next_node
         header.extend_from_slice(&encode_u32(0)); // first_node
 
         let length_prefixed_header =

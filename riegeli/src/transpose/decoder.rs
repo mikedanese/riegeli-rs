@@ -560,13 +560,9 @@ impl TransposeChunkDecoder {
         let num_records = chunk.header.num_records();
         let decoded_data_size = chunk.header.decoded_data_size();
 
-        if num_records == 0 {
-            return Ok(Self {
-                data: Vec::new(),
-                limits: Vec::new(),
-                next_yield: 0,
-            });
-        }
+        // Note: no early-out for num_records == 0. The C++ ChunkDecoder
+        // always runs TransposeDecoder::Decode, so a zero-record chunk with
+        // malformed contents is still rejected.
 
         // Determine if projection filtering is active.
         let active_projection: Option<&FieldProjection> = match projection {
@@ -1154,10 +1150,11 @@ impl TransposeChunkDecoder {
             nodes.push(node);
         }
 
-        // Read first_node. The bound applies even when num_states == 0: a
-        // chunk that claims records but no states has nowhere valid to
-        // start, and an unchecked first_node would index out of bounds
-        // into the sentinel-only node table (found by fuzzing).
+        // Read first_node. C++ rejects first_node >= state_machine_size
+        // unconditionally, which also rejects an empty state machine: a
+        // chunk with no states has nowhere valid to start, and an
+        // unchecked first_node would index out of bounds into the
+        // sentinel-only node table (found by fuzzing).
         let first_node = hdr.read_varint32()? as usize;
         if first_node >= num_states {
             return Err(RiegeliError::MalformedData(
@@ -2195,9 +2192,10 @@ fn finalize_records(
 ) -> Result<(Vec<u8>, Vec<usize>), RiegeliError> {
     let total_size = dest.pos();
     let n = limits.len();
-    if let Some(&last_limit) = limits.last()
-        && last_limit != total_size
-    {
+    // C++ Finish(): the last limit (or 0 when there are no records) must
+    // equal the destination position ("Unfinished message").
+    let last_limit = limits.last().copied().unwrap_or(0);
+    if last_limit != total_size {
         return Err(RiegeliError::MalformedData(
             format!("last limit {} != total size {}", last_limit, total_size).into(),
         ));
@@ -2655,17 +2653,28 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn test_zero_records() {
-        // Build a minimal zero-record chunk.
-        let mut header_bytes: Vec<u8> = Vec::new();
-        header_bytes.extend_from_slice(&encode_u32(0)); // num_buckets
-        header_bytes.extend_from_slice(&encode_u32(0)); // num_buffers
-        header_bytes.extend_from_slice(&encode_u32(0)); // num_states
-        header_bytes.extend_from_slice(&encode_u32(0)); // first_node
+        // A well-formed zero-record chunk, shaped like the C++ encoder's
+        // output for zero records: a single kNoOp state and first_node 0.
+        let states = vec![TestState::new(message_id::NO_OP, 0, 0, 0)];
+        let chunk = build_transpose_chunk(CompressionType::None, 0, 0, &states, &[], &[], 0);
 
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("new ok");
+        assert!(dec.read_record().unwrap().is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Zero-record chunks must still be fully validated (C++ has no
+    // num_records == 0 early-out in ChunkDecoder::Parse / Decode)
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_zero_records_garbage_chunk_rejected() {
+        // A chunk claiming 0 records whose body is garbage: the header
+        // length points at bytes that are not a parsable header. C++ parses
+        // (and rejects) the chunk regardless of num_records.
         let mut chunk_data: Vec<u8> = Vec::new();
         chunk_data.push(0x00); // CompressionType::None
-        chunk_data.extend_from_slice(&encode_u64(header_bytes.len() as u64));
-        chunk_data.extend_from_slice(&header_bytes);
+        chunk_data.extend_from_slice(&encode_u64(3)); // header_length
+        chunk_data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // incomplete varint
 
         let chunk_header = ChunkHeader::from_parts(&chunk_data, ChunkType::Transposed, 0, 0);
         let chunk = Chunk {
@@ -2673,8 +2682,46 @@ mod tests {
             data: chunk_data,
         };
 
-        let mut dec = TransposeChunkDecoder::new(chunk).expect("new ok");
-        assert!(dec.read_record().unwrap().is_none());
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "garbage zero-record chunk must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_zero_records_empty_state_machine_rejected() {
+        // num_states == 0 means first_node is always out of range; C++
+        // rejects with "First node index too large".
+        let chunk = build_transpose_chunk(CompressionType::None, 0, 0, &[], &[], &[], 0);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "empty state machine must be rejected (first_node out of range)"
+        );
+    }
+
+    #[test]
+    fn test_zero_records_with_message_start_rejected() {
+        // Executing a MessageStart with 0 expected records must fail
+        // ("Too many records" in C++).
+        let states = vec![TestState::new(message_id::START_OF_MESSAGE, 0, 0, 0)];
+        let chunk = build_transpose_chunk(CompressionType::None, 0, 0, &states, &[], &[], 0);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "a record boundary in a zero-record chunk must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_zero_records_nonzero_output_rejected() {
+        // A zero-record chunk that writes field bytes with no record
+        // boundary: C++ Finish() fails with "Unfinished message" because
+        // the destination position does not match the last limit.
+        let states = vec![TestState::new(0x08, 0, subtype::VARINT_INLINE_0, 0)];
+        let chunk = build_transpose_chunk(CompressionType::None, 0, 2, &states, &[], &[], 0);
+        assert!(
+            TransposeChunkDecoder::new(chunk).is_err(),
+            "decoded bytes without a record boundary must be rejected"
+        );
     }
 
     // -------------------------------------------------------------------
