@@ -75,6 +75,81 @@ pub(crate) fn compress_brotli(
     Ok(output)
 }
 
+/// Decompress Brotli bytes, requiring the stream to span the whole input.
+///
+/// The whole input must be consumed by the Brotli stream: the C++
+/// `Decompressor::VerifyEndAndClose` rejects any bytes left over after the
+/// compressed stream, so trailing data here is an error, not ignored.
+///
+/// Output is capped at `max_len`: decompression errors once it would
+/// materialize more than `max_len + 1` bytes, bounding decompression bombs.
+#[cfg(feature = "brotli")]
+pub(crate) fn decompress_brotli(input: &[u8], max_len: u64) -> Result<Vec<u8>, RiegeliError> {
+    use brotli::{BrotliDecompressStream, BrotliResult, BrotliState, HeapAlloc};
+
+    const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
+    let hard_cap = usize::try_from(max_len.saturating_add(1)).unwrap_or(usize::MAX);
+    let mut state = BrotliState::new(
+        HeapAlloc::<u8>::new(0),
+        HeapAlloc::<u32>::new(0),
+        HeapAlloc::new(Default::default()),
+    );
+    let mut available_in = input.len();
+    let mut input_offset = 0usize;
+    let mut output = vec![0u8; hard_cap.min(MAX_DECOMPRESS_PREALLOC as usize).max(64)];
+    let mut output_offset = 0usize;
+    let mut total_out = 0usize;
+    loop {
+        let mut available_out = output.len() - output_offset;
+        match BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            input,
+            &mut available_out,
+            &mut output_offset,
+            &mut output,
+            &mut total_out,
+            &mut state,
+        ) {
+            BrotliResult::ResultSuccess => {
+                if available_in != 0 {
+                    return Err(RiegeliError::MalformedData(
+                        "trailing data after Brotli-compressed stream".into(),
+                    ));
+                }
+                output.truncate(output_offset);
+                if output.len() as u64 > max_len {
+                    return Err(RiegeliError::MalformedData(
+                        format!("decompressed data exceeds its declared size ({max_len} bytes)")
+                            .into(),
+                    ));
+                }
+                return Ok(output);
+            }
+            BrotliResult::NeedsMoreOutput => {
+                if output.len() >= hard_cap {
+                    return Err(RiegeliError::MalformedData(
+                        format!("decompressed data exceeds its declared size ({max_len} bytes)")
+                            .into(),
+                    ));
+                }
+                let new_len = output.len().saturating_mul(2).max(4096).min(hard_cap);
+                output.resize(new_len, 0);
+            }
+            BrotliResult::NeedsMoreInput => {
+                return Err(RiegeliError::MalformedData(
+                    "brotli decompress error: truncated stream".into(),
+                ));
+            }
+            BrotliResult::ResultFailure => {
+                return Err(RiegeliError::MalformedData(
+                    "brotli decompress error: invalid stream".into(),
+                ));
+            }
+        }
+    }
+}
+
 /// Compress bytes using Zstd.
 #[cfg(feature = "zstd")]
 pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u8>, RiegeliError> {
@@ -103,6 +178,43 @@ pub(crate) fn compress_zstd(input: &[u8], opts: CompressOptions) -> Result<Vec<u
             .map_err(|e| RiegeliError::MalformedData(format!("zstd compress error: {e}").into()))?
     };
     Ok(compressed)
+}
+
+/// Decompress Zstd bytes, requiring the frame to span the whole input.
+///
+/// Decodes exactly one Zstd frame and requires it to span the whole input.
+/// The C++ `ZstdReader` does not concatenate frames, and
+/// `Decompressor::VerifyEndAndClose` rejects any bytes left over after the
+/// frame (including a second valid frame), so trailing data here is an error.
+///
+/// Output is capped at `max_len`: reading stops one byte past the cap and
+/// errors, bounding decompression bombs.
+#[cfg(feature = "zstd")]
+pub(crate) fn decompress_zstd(input: &[u8], max_len: u64) -> Result<Vec<u8>, RiegeliError> {
+    use std::io::Read as _;
+
+    const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
+    let cursor = std::io::Cursor::new(input);
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(cursor)
+        .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}").into()))?
+        .single_frame();
+    let mut output = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
+    (&mut decoder)
+        .take(max_len.saturating_add(1))
+        .read_to_end(&mut output)
+        .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}").into()))?;
+    if output.len() as u64 > max_len {
+        return Err(RiegeliError::MalformedData(
+            format!("decompressed data exceeds its declared size ({max_len} bytes)").into(),
+        ));
+    }
+    let consumed = decoder.finish().position() as usize;
+    if consumed < input.len() {
+        return Err(RiegeliError::MalformedData(
+            "trailing data after Zstd-compressed stream".into(),
+        ));
+    }
+    Ok(output)
 }
 
 /// Compress bytes using Snappy.
@@ -264,7 +376,6 @@ pub(crate) fn decompress_data_capped(
     compression: CompressionType,
     max_len: u64,
 ) -> Result<Vec<u8>, RiegeliError> {
-    use std::io::Read as _;
     let check = |out: Vec<u8>| {
         if out.len() as u64 > max_len {
             Err(RiegeliError::MalformedData(
@@ -279,16 +390,7 @@ pub(crate) fn decompress_data_capped(
         CompressionType::Brotli => {
             #[cfg(feature = "brotli")]
             {
-                const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
-                let mut out = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
-                let reader = brotli::Decompressor::new(data, 4096);
-                reader
-                    .take(max_len.saturating_add(1))
-                    .read_to_end(&mut out)
-                    .map_err(|e| {
-                        RiegeliError::MalformedData(format!("brotli decompress error: {e}").into())
-                    })?;
-                check(out)
+                decompress_brotli(data, max_len)
             }
             #[cfg(not(feature = "brotli"))]
             {
@@ -300,18 +402,7 @@ pub(crate) fn decompress_data_capped(
         CompressionType::Zstd => {
             #[cfg(feature = "zstd")]
             {
-                const MAX_DECOMPRESS_PREALLOC: u64 = 1 << 24; // 16 MiB
-                let mut out = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
-                let reader = zstd::stream::read::Decoder::new(data).map_err(|e| {
-                    RiegeliError::MalformedData(format!("zstd decoder init: {e}").into())
-                })?;
-                reader
-                    .take(max_len.saturating_add(1))
-                    .read_to_end(&mut out)
-                    .map_err(|e| {
-                        RiegeliError::MalformedData(format!("zstd decompress error: {e}").into())
-                    })?;
-                check(out)
+                decompress_zstd(data, max_len)
             }
             #[cfg(not(feature = "zstd"))]
             {
@@ -343,5 +434,105 @@ pub(crate) fn decompress_data_capped(
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unused_imports)]
+    use super::*;
+
+    const INPUT: &[u8] = b"hello world hello world hello world";
+
+    // C++ `Decompressor::VerifyEndAndClose` requires the source to end exactly
+    // where the compressed stream ends; bytes left over after the stream make
+    // the chunk invalid. The tests below pin that accept/reject behavior.
+
+    #[test]
+    #[cfg(feature = "brotli")]
+    fn brotli_round_trip() {
+        let compressed = compress_brotli(INPUT, CompressOptions::default()).unwrap();
+        let out = decompress_data_capped(&compressed, CompressionType::Brotli, 1 << 20).unwrap();
+        assert_eq!(out, INPUT);
+    }
+
+    #[test]
+    #[cfg(feature = "brotli")]
+    fn brotli_trailing_garbage_rejected() {
+        let mut compressed = compress_brotli(INPUT, CompressOptions::default()).unwrap();
+        compressed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let result = decompress_data_capped(&compressed, CompressionType::Brotli, 1 << 20);
+        assert!(
+            result.is_err(),
+            "trailing bytes after the Brotli stream must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "brotli")]
+    fn brotli_truncated_stream_rejected() {
+        let compressed = compress_brotli(INPUT, CompressOptions::default()).unwrap();
+        let truncated = &compressed[..compressed.len() - 1];
+        let result = decompress_data_capped(truncated, CompressionType::Brotli, 1 << 20);
+        assert!(
+            result.is_err(),
+            "truncated Brotli stream must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_round_trip() {
+        let compressed = compress_zstd(INPUT, CompressOptions::default()).unwrap();
+        let out = decompress_data_capped(&compressed, CompressionType::Zstd, 1 << 20).unwrap();
+        assert_eq!(out, INPUT);
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_trailing_garbage_rejected() {
+        let mut compressed = compress_zstd(INPUT, CompressOptions::default()).unwrap();
+        compressed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let result = decompress_data_capped(&compressed, CompressionType::Zstd, 1 << 20);
+        assert!(
+            result.is_err(),
+            "trailing bytes after the Zstd frame must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_second_frame_rejected() {
+        // C++ ZstdReader does not concatenate frames: it stops at the end of
+        // the first frame and VerifyEnd rejects the leftover bytes, even if
+        // they form another valid frame.
+        let mut compressed = compress_zstd(INPUT, CompressOptions::default()).unwrap();
+        let empty_frame = compress_zstd(b"", CompressOptions::default()).unwrap();
+        compressed.extend_from_slice(&empty_frame);
+        let result = decompress_data_capped(&compressed, CompressionType::Zstd, 1 << 20);
+        assert!(
+            result.is_err(),
+            "a second Zstd frame after the first must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "snappy")]
+    fn snappy_round_trip() {
+        let compressed = compress_snappy(INPUT).unwrap();
+        let out = decompress_data_capped(&compressed, CompressionType::Snappy, 1 << 20).unwrap();
+        assert_eq!(out, INPUT);
+    }
+
+    #[test]
+    #[cfg(feature = "snappy")]
+    fn snappy_trailing_garbage_rejected() {
+        let mut compressed = compress_snappy(INPUT).unwrap();
+        compressed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let result = decompress_data_capped(&compressed, CompressionType::Snappy, 1 << 20);
+        assert!(
+            result.is_err(),
+            "trailing bytes after the Snappy data must be rejected, got {result:?}"
+        );
     }
 }
