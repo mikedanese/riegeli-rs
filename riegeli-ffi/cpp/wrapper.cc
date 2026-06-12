@@ -211,8 +211,18 @@ uint64_t reader_pos_numeric(const StringRecordReader& reader) {
   return reader.reader->pos().numeric();
 }
 
+// The string_view returned by ReadRecord borrows the reader's internal
+// buffers and is invalidated by the next non-const operation on the reader.
+// Every entry point that mutates the reader must drop the cached view so
+// that last_record cannot hand out a dangling slice.
+static void clear_last_record(StringRecordReader& reader) {
+  reader.last_record_ptr = nullptr;
+  reader.last_record_size = 0;
+}
+
 bool reader_seek_numeric(StringRecordReader& reader, uint64_t pos) {
   if (!reader.reader) return false;
+  clear_last_record(reader);
   const bool ok = reader.reader->Seek(riegeli::Position{pos});
   if (!ok && !reader.reader->ok()) {
     reader.is_ok = false;
@@ -229,8 +239,7 @@ bool reader_read_next(StringRecordReader& reader) {
       reader.is_ok = false;
       reader.error_message = reader.reader->status().ToString();
     }
-    reader.last_record_ptr = nullptr;
-    reader.last_record_size = 0;
+    clear_last_record(reader);
     return false;
   }
   reader.last_record_ptr = reinterpret_cast<const uint8_t*>(record.data());
@@ -248,6 +257,7 @@ size_t reader_last_record_len(const StringRecordReader& reader) {
 
 bool reader_close(StringRecordReader& reader) {
   if (!reader.reader) return false;
+  clear_last_record(reader);
   if (!reader.reader->Close()) {
     reader.is_ok = false;
     reader.error_message = reader.reader->status().ToString();
@@ -265,6 +275,7 @@ rust::String reader_status_message(const StringRecordReader& reader) {
 bool reader_read_serialized_metadata(StringRecordReader& reader,
                                      rust::Vec<uint8_t>& metadata_out) {
   if (!reader.reader || !reader.is_ok) return false;
+  clear_last_record(reader);
   riegeli::Chain metadata;
   if (!reader.reader->ReadSerializedMetadata(metadata)) {
     if (!reader.reader->ok()) {
