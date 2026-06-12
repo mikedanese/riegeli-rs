@@ -334,7 +334,7 @@ fn ten_thousand_records_roundtrip_simple_none() {
 
     let mut reader = RecordReader::new(Cursor::new(&data), ReaderOptions::new()).unwrap();
     let mut count = 0;
-    while let Some(_) = reader.read_record().unwrap() {
+    while reader.read_record().unwrap().is_some() {
         count += 1;
     }
     assert_eq!(count, 10_000, "Expected exactly 10,000 records back");

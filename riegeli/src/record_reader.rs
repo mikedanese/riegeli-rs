@@ -1310,9 +1310,12 @@ impl<R: Read + Seek> RecordReader<R> {
                 self.reader.read_exact(&mut bh_bytes)?;
                 let bh = BlockHeader::from_bytes(bh_bytes);
                 if !bh.is_valid() {
-                    return Err(RiegeliError::MalformedData(format!(
+                    return Err(RiegeliError::MalformedData(
+                        format!(
                         "invalid block header hash at file position {file_pos} (during data read)"
-                    ).into()));
+                    )
+                        .into(),
+                    ));
                 }
                 file_pos += BLOCK_HEADER_SIZE;
                 // Seek to data position after the block header.
@@ -1617,8 +1620,8 @@ mod tests {
         // Make sure we're not corrupting a block header position.
         let mid = if mid % 65536 < 24 { mid + 24 } else { mid };
         if mid + 8 < data.len() {
-            for i in mid..mid + 8 {
-                data[i] ^= 0xFF;
+            for b in &mut data[mid..mid + 8] {
+                *b ^= 0xFF;
             }
         }
 
@@ -1794,7 +1797,7 @@ mod tests {
         header_bytes.extend_from_slice(&encode_u32(1)); // num_states
         header_bytes.extend_from_slice(&encode_u32(message_id::NON_PROTO)); // tag for state 0
         header_bytes.extend_from_slice(&encode_u32(0)); // next_node for state 0
-        // NonProto reads buffer_index:
+                                                        // NonProto reads buffer_index:
         header_bytes.extend_from_slice(&encode_u32(0)); // buffer_index = 0 (nonproto data)
         header_bytes.extend_from_slice(&encode_u32(0)); // first_node
 
@@ -2026,7 +2029,7 @@ mod tests {
 
         // Collect record positions, then seek back to each and re-read.
         let mut positions = Vec::new();
-        while let Some(_) = reader.read_record().expect("read ok") {
+        while reader.read_record().expect("read ok").is_some() {
             positions.push(reader.last_pos());
         }
         assert_eq!(positions.len(), n);
@@ -2401,7 +2404,7 @@ mod tests {
     #[test]
     fn recovery_walks_corrupt_chain_with_contiguous_regions() {
         const N: usize = 200; // corrupt chunks between two good ones
-        // Record k..=N+1 prefix files give every chunk span.
+                              // Record k..=N+1 prefix files give every chunk span.
         let mut lens = Vec::with_capacity(N + 3);
         let mut recs: Vec<Vec<u8>> = Vec::new();
         for k in 0..(N + 2) {
@@ -2416,9 +2419,8 @@ mod tests {
             "keep it single-block for span math"
         );
         // Corrupt the final data byte of chunks 1..=N (leave first and last).
-        for k in 1..=N {
-            let idx = lens[k] - 1;
-            data[idx] ^= 0xFF;
+        for &len in &lens[1..=N] {
+            data[len - 1] ^= 0xFF;
         }
 
         let regions: Rc<RefCell<Vec<crate::SkippedRegion>>> = Rc::new(RefCell::new(Vec::new()));
@@ -2634,7 +2636,7 @@ mod tests {
                 let mut i = 0usize;
                 while i < header.len() {
                     let pos = file.len() as u64;
-                    if pos % BLOCK_SIZE == 0 {
+                    if pos.is_multiple_of(BLOCK_SIZE) {
                         let bh = crate::block_header::BlockHeader::from_parts(
                             pos - chunk_begin,
                             chunk_end - pos,
@@ -2893,7 +2895,6 @@ mod tests {
                 self.0.borrow_mut().seek(pos)
             }
         }
-        use std::io::Read as _;
 
         let one = write_records(&[b"first"], WriterOptions::new().chunk_size(1));
         let full = write_records(&[b"first", b"second"], WriterOptions::new().chunk_size(1));

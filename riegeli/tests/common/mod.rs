@@ -2,6 +2,9 @@
 //!
 //! Shared helpers used by recovery and transpose roundtrip tests.
 
+// Each test binary compiles this module separately and uses a subset of it.
+#![allow(dead_code)]
+
 use std::io::Cursor;
 
 use riegeli::{ReaderOptions, RecordReader, RecordWriter, WriterOptions as RustWriterOptions};

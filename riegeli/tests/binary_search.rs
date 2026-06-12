@@ -42,6 +42,7 @@ fn decode_u32(buf: &[u8]) -> Result<(u32, usize), String> {
 // Proto encoding helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 fn encode_varint_field(field_number: u32, value: u64) -> Vec<u8> {
     let tag = (field_number << 3) | 0u32;
     let mut out = encode_u32(tag);
@@ -145,16 +146,6 @@ fn write_records(records: &[Vec<u8>], opts: WriterOptions) -> Vec<u8> {
         w.flush().expect("flush ok");
     }
     buf.into_inner()
-}
-
-/// Read all records from a Riegeli file with the given options.
-fn read_all(data: &[u8], opts: ReaderOptions) -> Vec<Vec<u8>> {
-    let mut reader = RecordReader::new(Cursor::new(data), opts).expect("reader new ok");
-    let mut out = Vec::new();
-    while let Some(rec) = reader.read_record().expect("read ok") {
-        out.push(rec);
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 //! `SUBMESSAGE_WIRE_TYPE` sentinel, and predicates `has_subtype` and
 //! `has_data_buffer` that mirror the C++ `transpose_internal.h`.
 
-use crate::proto::{WireType, tag_wire_type};
+use crate::proto::{tag_wire_type, WireType};
 
 // ---------------------------------------------------------------------------
 // MessageId
@@ -56,6 +56,7 @@ pub mod subtype {
     pub const VARINT_INLINE_0: u8 = VARINT_MAX + 1; // 10
 
     /// Maximum inline varint value (127), giving subtype 10 + 127 = 137.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const VARINT_INLINE_MAX: u8 = VARINT_INLINE_0 + 0x7F; // 137
 
     // -- Subtypes of WireType::LengthDelimited --
@@ -233,7 +234,7 @@ mod tests {
         assert_eq!(message_id::START_OF_MESSAGE, 3);
         assert_eq!(message_id::ROOT, 4);
         // All reserved IDs must be < 8 so they don't collide with valid proto tags.
-        assert!(message_id::ROOT < 8);
+        const { assert!(message_id::ROOT < 8) };
     }
 
     // ---- Subtype constants ----

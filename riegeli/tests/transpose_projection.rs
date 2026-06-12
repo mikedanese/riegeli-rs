@@ -42,6 +42,7 @@ fn decode_u32(buf: &[u8]) -> Result<(u32, usize), String> {
 // ---------------------------------------------------------------------------
 
 /// Encode a proto varint field: tag (field_number, wire_type=0) + varint value.
+#[allow(clippy::identity_op)] // tags spell out the varint wiretype: (field << 3) | 0
 fn encode_varint_field(field_number: u32, value: u64) -> Vec<u8> {
     let tag = (field_number << 3) | 0; // wire type 0 = varint
     let mut out = encode_u32(tag);
@@ -194,8 +195,6 @@ fn write_records(records: &[&[u8]], opts: WriterOptions) -> Vec<u8> {
     buf.into_inner()
 }
 
-/// Read all records from bytes with given options.
-
 fn encode_group(field: u32, content: &[u8]) -> Vec<u8> {
     let mut out = encode_u32((field << 3) | 3);
     out.extend_from_slice(content);
@@ -203,6 +202,7 @@ fn encode_group(field: u32, content: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Read all records from bytes with given options.
 fn read_all(data: &[u8], opts: ReaderOptions) -> Vec<Vec<u8>> {
     let cursor = Cursor::new(data);
     let mut reader = RecordReader::new(cursor, opts).expect("reader new ok");
@@ -462,12 +462,12 @@ fn test_size_preserves_position_mid_read() {
     let mut reader = RecordReader::new(cursor, ReaderOptions::new()).expect("new ok");
 
     // Read 10 records.
-    for i in 0..10 {
+    for expected in &records[..10] {
         let rec = reader
             .read_record()
             .expect("read ok")
             .expect("should have record");
-        assert_eq!(rec, records[i]);
+        assert_eq!(&rec, expected);
     }
 
     // Call size() mid-read.
