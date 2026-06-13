@@ -136,6 +136,12 @@ fn skip_canonical_varint64(data: &[u8], pos: usize) -> Option<usize> {
             return None;
         }
         let byte = remaining[i];
+        // On the 10th byte (i==9), only the lowest bit is valid for u64;
+        // a larger byte encodes a value that does not fit (C++ `SkipVarint`
+        // rejects `byte >= 2` on the last possible byte).
+        if i == 9 && (byte & 0x7F) > 1 {
+            return None;
+        }
         if byte < 0x80 {
             // Canonical check: last byte must not be 0 in multi-byte varint.
             if i > 0 && byte == 0 {
@@ -294,10 +300,15 @@ pub fn is_proto_message(data: &[u8]) -> bool {
                     None => return false,
                 };
                 pos += consumed;
-                if pos + (length as usize) > data.len() {
-                    return false;
+                // Checked add: `length` is attacker-controlled (up to
+                // u32::MAX); on a 32-bit target a wrapping add would let the
+                // truncation check pass and move `pos` backward, re-parsing
+                // earlier bytes forever. C++ uses `record.Skip(length)`,
+                // which fails cleanly on truncation.
+                match pos.checked_add(length as usize) {
+                    Some(end) if end <= data.len() => pos = end,
+                    _ => return false,
                 }
-                pos += length as usize;
             }
             WireType::StartGroup => {
                 // StartGroup: push field number.
@@ -562,6 +573,20 @@ mod tests {
     }
 
     #[test]
+    fn test_length_delimited_huge_length_rejected() {
+        // Field 2, LengthDelimited, canonical 5-byte length 0xFFFFFFFA
+        // (u32::MAX - 5). The remaining data is far shorter, so this must be
+        // rejected. On a 32-bit target an unchecked `pos + length` would
+        // wrap to 0, pass the truncation check, and loop forever; C++ fails
+        // via `record.Skip(length)`.
+        let data = [0x12, 0xFA, 0xFF, 0xFF, 0xFF, 0x0F];
+        assert!(!is_proto_message(&data));
+        // Same with the maximum encodable length.
+        let data = [0x12, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        assert!(!is_proto_message(&data));
+    }
+
+    #[test]
     fn test_truncated_varint_at_end() {
         let data = [0x88];
         assert!(!is_proto_message(&data));
@@ -596,6 +621,23 @@ mod tests {
         let mut data = vec![0x08];
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
         assert!(is_proto_message(&data));
+    }
+
+    #[test]
+    fn test_varint_10th_byte_overflowing_u64_rejected() {
+        // A 10-byte varint whose last byte is 2..=0x7F encodes a value that
+        // does not fit in u64. C++ `SkipVarint` rejects this on the last
+        // possible byte (`byte >= 1 << (64 - 9 * 7)`, i.e. byte >= 2), so
+        // `IsProtoMessage` classifies such records as non-proto.
+        for last in [0x02u8, 0x03, 0x7F] {
+            let mut data = vec![0x08];
+            data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+            data.push(last);
+            assert!(
+                !is_proto_message(&data),
+                "10-byte varint ending in {last:#04x} overflows u64 and must be rejected"
+            );
+        }
     }
 
     #[test]

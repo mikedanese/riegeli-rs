@@ -643,11 +643,16 @@ impl TransposeChunkDecoder {
         })?;
         pos += consumed;
 
-        // checked_add: header_length is attacker-claimed; a wrapping add
-        // would let the bounds check pass and the slice below panic.
-        let header_end = pos.checked_add(header_length as usize).ok_or_else(|| {
-            RiegeliError::MalformedData("transpose header length overflows".into())
-        })?;
+        // try_from + checked_add: header_length is attacker-claimed; an `as`
+        // cast would truncate the claim on a 32-bit target before any bounds
+        // check ran, and a wrapping add would let the bounds check pass and
+        // the slice below panic.
+        let header_end = usize::try_from(header_length)
+            .ok()
+            .and_then(|len| pos.checked_add(len))
+            .ok_or_else(|| {
+                RiegeliError::MalformedData("transpose header length overflows".into())
+            })?;
         if header_end > data.len() {
             return Err(RiegeliError::MalformedData(
                 "transpose header extends past chunk data".into(),
@@ -669,13 +674,26 @@ impl TransposeChunkDecoder {
         // reservation from the raw claim (up to u32::MAX elements) would
         // fire first. Each element costs at least one varint byte, so the
         // cursor's remaining length bounds the real count.
+        // try_from, not `as`: the claimed sizes are attacker-controlled
+        // varint64s; on a 32-bit target an `as usize` cast would silently
+        // truncate them mod 2^32 and downstream accounting would balance on
+        // the wrong values. C++ rejects claims exceeding size_t with
+        // "Bucket too large" / "Buffer too large".
         let mut bucket_compressed_sizes = Vec::with_capacity(num_buckets.min(hdr.remaining()));
         for _ in 0..num_buckets {
-            bucket_compressed_sizes.push(hdr.read_varint64()? as usize);
+            let size = hdr.read_varint64()?;
+            bucket_compressed_sizes.push(
+                usize::try_from(size)
+                    .map_err(|_| RiegeliError::MalformedData("bucket too large".into()))?,
+            );
         }
         let mut buffer_uncompressed_sizes = Vec::with_capacity(num_buffers.min(hdr.remaining()));
         for _ in 0..num_buffers {
-            buffer_uncompressed_sizes.push(hdr.read_varint64()? as usize);
+            let size = hdr.read_varint64()?;
+            buffer_uncompressed_sizes.push(
+                usize::try_from(size)
+                    .map_err(|_| RiegeliError::MalformedData("buffer too large".into()))?,
+            );
         }
 
         // Parse state machine metadata (needed for projection even if we
@@ -874,7 +892,10 @@ impl TransposeChunkDecoder {
                 format!("reading bucket uncompressed_size prefix: {e}").into(),
             )
         })?;
-        Ok(size as usize)
+        // try_from, not `as`: the claimed uncompressed size is attacker-
+        // controlled; on a 32-bit target an `as usize` cast would silently
+        // truncate it mod 2^32 (C++ rejects with "Bucket too large").
+        usize::try_from(size).map_err(|_| RiegeliError::MalformedData("bucket too large".into()))
     }
 
     /// Compute the mapping from buffer indices to bucket indices.
@@ -2382,6 +2403,44 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("underflow") || msg.contains("varint") || msg.contains("truncated"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// Bucket/buffer size claims beyond the chunk (here 2^32, which an `as
+    /// usize` cast would truncate to 0 on a 32-bit target) must be rejected.
+    /// C++ fails such claims with "Bucket too large" / "Buffer too large" or
+    /// a failed read; they must never be silently narrowed.
+    #[test]
+    fn hostile_huge_bucket_size_claim_is_rejected() {
+        // varint64(2^32)
+        let huge: [u8; 5] = [0x80, 0x80, 0x80, 0x80, 0x10];
+        // header blob: num_buckets=1, num_buffers=1,
+        //              bucket_size=2^32, buffer_size=2^32, num_states=0
+        let mut blob = vec![0x01, 0x01];
+        blob.extend_from_slice(&huge);
+        blob.extend_from_slice(&huge);
+        blob.push(0x00);
+
+        let mut data = vec![0u8]; // CompressionType::None
+        data.push(blob.len() as u8); // varint header_length
+        data.extend_from_slice(&blob);
+
+        let header = crate::chunk_header::ChunkHeader::from_parts(
+            &data,
+            crate::chunk_header::ChunkType::Transposed,
+            1,
+            0,
+        );
+        let chunk = crate::simple_chunk::Chunk { header, data };
+        let err = TransposeChunkDecoder::new_with_projection(chunk, None)
+            .err()
+            .expect("huge bucket size claim must error");
+        let msg = err.to_string();
+        assert!(
+            // 64-bit: the claim exceeds the chunk bytes; 32-bit: the claim
+            // exceeds usize and is rejected before any arithmetic.
+            msg.contains("extends past") || msg.contains("too large"),
             "unexpected error: {msg}"
         );
     }
