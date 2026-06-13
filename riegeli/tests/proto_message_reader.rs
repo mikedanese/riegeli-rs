@@ -4,11 +4,11 @@
 
 use std::cell::RefCell;
 
-use riegeli::proto::{
-    encode_varint32, encode_varint64, make_tag, read_message, DynamicHandlerSet, EmptyHandlerSet,
-    FieldHandler, SerializedMessageWriter, StaticHandlerSet, WireType,
-};
 use riegeli::RiegeliError;
+use riegeli::proto::{
+    DynamicHandlerSet, EmptyHandlerSet, FieldHandler, SerializedMessageWriter, StaticHandlerSet,
+    WireType, encode_varint32, encode_varint64, make_tag, read_message,
+};
 
 // ---------------------------------------------------------------------------
 // Helper: static handler implementations
