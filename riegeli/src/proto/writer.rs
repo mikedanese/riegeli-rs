@@ -1,8 +1,8 @@
 //! Builder for incrementally constructing serialized protobuf messages.
 
-use super::field_iter::{serialize_field, ProtoField};
+use super::field_iter::{ProtoField, serialize_field};
 use super::wire::{
-    encode_tag, encode_varint32, encode_varint64, zigzag_encode_i32, zigzag_encode_i64, WireType,
+    WireType, encode_tag, encode_varint32, encode_varint64, zigzag_encode_i32, zigzag_encode_i64,
 };
 
 /// The maximum length of a length-delimited field body (2 GiB, the proto limit).
@@ -273,9 +273,11 @@ impl SerializedMessageWriter {
     ///
     /// Returns an error if:
     /// - No scope is currently open.
-    /// - The content exceeds the 2 GiB proto limit.
+    /// - The content exceeds the 2 GiB proto limit. In this case the scope
+    ///   remains open, so a later `finish()` reports the unclosed scope
+    ///   instead of returning bytes with a missing length prefix.
     pub fn close_length_delimited(&mut self) -> Result<(), crate::RiegeliError> {
-        let content_start = self.scope_stack.pop().ok_or_else(|| {
+        let content_start = *self.scope_stack.last().ok_or_else(|| {
             crate::RiegeliError::MalformedData(
                 "close_length_delimited() called without matching open".into(),
             )
@@ -283,6 +285,10 @@ impl SerializedMessageWriter {
 
         let content_len = self.buf.len() - content_start;
         if content_len > MAX_LENGTH_DELIMITED {
+            // Validate before consuming the scope: at this point the buffer
+            // holds the field's tag followed by raw content with no length
+            // prefix, so popping the scope would let finish() succeed and
+            // return structurally corrupt bytes.
             return Err(crate::RiegeliError::MalformedData(
                 format!(
                     "length-delimited field length {} exceeds 2 GiB limit",
@@ -291,6 +297,7 @@ impl SerializedMessageWriter {
                 .into(),
             ));
         }
+        self.scope_stack.pop();
 
         // Encode the length varint into a temporary buffer, then splice it in.
         let mut len_varint = Vec::new();
@@ -355,7 +362,7 @@ mod tests {
         w.open_length_delimited(2).unwrap();
         w.write_uint64(1, 1).unwrap();
         w.close_length_delimited().unwrap(); // closes field 2
-                                             // field 1 still open
+        // field 1 still open
         assert!(w.finish().is_err());
     }
 
@@ -368,6 +375,27 @@ mod tests {
         let bytes = w.finish().unwrap();
         // tag = (0 << 3) | 0 = 0, which is not a valid proto tag
         assert!(!crate::proto::is_proto_message(&bytes));
+    }
+
+    #[test]
+    fn close_length_delimited_over_limit_leaves_scope_open() {
+        // Closing a scope whose content exceeds the 2 GiB proto limit must
+        // fail without consuming the scope. At that point the buffer holds
+        // the field's LengthDelimited tag followed by raw content with no
+        // length prefix, so if the scope were popped, a subsequent finish()
+        // would return structurally corrupt bytes. With the scope left open,
+        // finish() reports the inconsistency instead.
+        let mut w = SerializedMessageWriter::new();
+        w.open_length_delimited(1).unwrap();
+        // Simulate over-limit content by growing the internal buffer
+        // directly; only the content length of the open scope matters.
+        let target_len = w.buf.len() + MAX_LENGTH_DELIMITED + 1;
+        w.buf.resize(target_len, 0);
+        assert!(w.close_length_delimited().is_err());
+        assert!(
+            w.finish().is_err(),
+            "finish() must not bless a buffer holding a dangling length-delimited tag"
+        );
     }
 
     #[test]

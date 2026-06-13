@@ -1,8 +1,8 @@
 //! Zero-copy proto field iterator and filtered iterator.
 
 use super::wire::{
-    encode_tag, encode_varint32, encode_varint64, read_canonical_varint32, read_canonical_varint64,
-    tag_field_number, tag_wire_type, WireType,
+    WireType, encode_tag, encode_varint32, encode_varint64, read_canonical_varint32,
+    read_canonical_varint64, tag_field_number, tag_wire_type,
 };
 
 /// The value component of a decoded proto field.
@@ -257,6 +257,9 @@ pub struct FilteredFieldIter<'a> {
     /// `group_depth > 0`) is being kept or skipped. Decided once at the
     /// group's top-level `StartGroup` marker.
     keeping_group: bool,
+    /// Whether this iterator has reported a structural error of its own
+    /// (e.g. an unmatched top-level `EndGroup`). Once set, iteration ends.
+    errored: bool,
 }
 
 impl<'a> FilteredFieldIter<'a> {
@@ -272,6 +275,7 @@ impl<'a> FilteredFieldIter<'a> {
             allowed,
             group_depth: 0,
             keeping_group: false,
+            errored: false,
         }
     }
 }
@@ -280,6 +284,9 @@ impl<'a> Iterator for FilteredFieldIter<'a> {
     type Item = Result<ProtoField<'a>, crate::RiegeliError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.errored {
+            return None;
+        }
         loop {
             match self.inner.next() {
                 Some(Ok(field)) => {
@@ -307,6 +314,20 @@ impl<'a> Iterator for FilteredFieldIter<'a> {
                             return Some(Ok(field));
                         }
                         continue;
+                    }
+                    if field.wire_type == WireType::EndGroup {
+                        // A top-level EndGroup has no matching StartGroup: the
+                        // input is structurally malformed. Surface an error
+                        // instead of yielding the dangling marker as a field
+                        // or silently dropping it.
+                        self.errored = true;
+                        return Some(Err(crate::RiegeliError::MalformedData(
+                            format!(
+                                "end-group tag for field {} without matching start-group",
+                                field.field_number
+                            )
+                            .into(),
+                        )));
                     }
                     if self.allowed.contains(&field.field_number) {
                         return Some(Ok(field));
@@ -700,6 +721,33 @@ mod tests {
             .unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].value, FieldValue::Varint(7));
+    }
+
+    #[test]
+    fn filtered_iter_unmatched_top_level_end_group_is_error() {
+        // A top-level EndGroup with no preceding StartGroup is structurally
+        // malformed (is_proto_message rejects it). The filtered iterator
+        // tracks group scope, so it must surface an error instead of
+        // yielding the dangling EndGroup as an ordinary field (when its
+        // field number is allowed) or silently dropping it (when not).
+        let data = vec![0x0C, 0x08, 0x07]; // EndGroup(1), then field 1 varint 7
+
+        let results: Vec<_> = FilteredFieldIter::new(&data, &[1]).collect();
+        assert_eq!(results.len(), 1, "iteration must stop at the error");
+        assert!(results[0].is_err());
+
+        let results: Vec<_> = FilteredFieldIter::new(&data, &[2]).collect();
+        assert_eq!(results.len(), 1, "iteration must stop at the error");
+        assert!(results[0].is_err());
+    }
+
+    #[test]
+    fn copy_fields_unmatched_top_level_end_group_is_error() {
+        // copy_fields' contract is to return an error on malformed source
+        // bytes; a dangling EndGroup must not be serialized into the output.
+        let data = vec![0x0C, 0x08, 0x07];
+        let mut writer = super::super::writer::SerializedMessageWriter::new();
+        assert!(copy_fields(&data, &[1], &mut writer).is_err());
     }
 
     #[test]
