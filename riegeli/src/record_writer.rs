@@ -34,7 +34,8 @@ const DEFAULT_CHUNK_SIZE: u64 = 1 << 20;
 pub struct WriterOptions {
     compression: CompressionType,
     chunk_size: u64,
-    /// If non-zero, pad the file so its total size is a multiple of this value on close().
+    /// If non-zero, pad so the starting position is a multiple of this value when
+    /// appending at a nonzero position (no effect on a fresh file, like C++).
     initial_padding: u64,
     /// If non-zero, pad the file so its total size is a multiple of this value after every flush() and close().
     final_padding: u64,
@@ -114,11 +115,15 @@ impl WriterOptions {
         self
     }
 
-    /// Pad the file so its total size is a multiple of `size` bytes on `close()` only.
+    /// Pad the file so the starting position is a multiple of `size` bytes
+    /// when appending to an existing file at a nonzero position.
     ///
-    /// When set, a `ChunkType::Padding` chunk is written at the end of `close()`
-    /// so that `file_size % size == 0`. This allows two files written with the same
-    /// padding alignment to be concatenated at the byte level and read as one file.
+    /// This matches the C++ option of the same name: padding is written at the
+    /// *beginning* of the output, and only when the writer starts at a nonzero
+    /// position. This writer always starts a fresh file at position 0, where
+    /// the C++ writer skips initial padding entirely, so this option currently
+    /// has no effect. It is kept for option parity with the C++ implementation.
+    /// Use [`final_padding`](Self::final_padding) to align the file size.
     ///
     /// Setting `size` to 0 disables padding (the default).
     pub fn initial_padding(mut self, size: u64) -> Self {
@@ -218,7 +223,11 @@ pub struct RecordWriter<W: Write> {
     /// Desired chunk size threshold in bytes (capped so that `num_records`
     /// cannot overflow the 56-bit field of `chunk_type_and_num_records`).
     chunk_size: u64,
-    /// If non-zero, pad the file so its total size is a multiple of this value on close.
+    /// If non-zero, pad so the starting position reaches a multiple of this value when
+    /// appending at a nonzero position. This writer always starts a fresh file, so the
+    /// value is currently unused (kept for parity with the C++ option; C++ never
+    /// applies initial padding at close either).
+    #[allow(dead_code)]
     initial_padding: u64,
     /// If non-zero, pad after every flush() and close().
     final_padding: u64,
@@ -242,6 +251,11 @@ pub struct RecordWriter<W: Write> {
     pending_record_count: u64,
     /// Whether `close()` has been called.
     closed: bool,
+    /// Set to the message of the first error once any operation fails. Like the
+    /// C++ writer (which checks `ok()` on every public entry point), a failed
+    /// writer refuses all further operations: the stream may hold a partial
+    /// chunk and `file_pos` may no longer match the true stream length.
+    failed: Option<String>,
 }
 
 impl<W: Write> RecordWriter<W> {
@@ -252,10 +266,12 @@ impl<W: Write> RecordWriter<W> {
     /// Returns an error if `window_log` is set but `compression` is
     /// `CompressionType::None` or `CompressionType::Snappy`.
     pub fn new(mut writer: W, options: WriterOptions) -> Result<Self, RiegeliError> {
-        // Validate window_log against compression type.
-        if options.window_log.is_some() {
-            match options.compression {
-                CompressionType::None | CompressionType::Snappy => {
+        // Validate compression tuning options eagerly, matching the C++
+        // `CompressorOptions` setters which assert these ranges at option-set
+        // time (so misconfigurations are rejected before any bytes are written).
+        match options.compression {
+            CompressionType::None | CompressionType::Snappy => {
+                if options.window_log.is_some() {
                     return Err(RiegeliError::MalformedData(
                         format!(
                             "window_log is not applicable to compression type {:?}",
@@ -264,7 +280,45 @@ impl<W: Write> RecordWriter<W> {
                         .into(),
                     ));
                 }
-                _ => {}
+            }
+            CompressionType::Brotli => {
+                if let Some(level) = options.compression_level
+                    && !(0..=11).contains(&level)
+                {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "compression_level out of range for Brotli: {level} (valid: 0..=11)"
+                        )
+                        .into(),
+                    ));
+                }
+                if let Some(log) = options.window_log
+                    && !(10..=30).contains(&log)
+                {
+                    return Err(RiegeliError::MalformedData(
+                        format!("window_log out of range for Brotli: {log} (valid: 10..=30)")
+                            .into(),
+                    ));
+                }
+            }
+            CompressionType::Zstd => {
+                if let Some(level) = options.compression_level
+                    && !(-131072..=22).contains(&level)
+                {
+                    return Err(RiegeliError::MalformedData(
+                        format!(
+                            "compression_level out of range for Zstd: {level} (valid: -131072..=22)"
+                        )
+                        .into(),
+                    ));
+                }
+                if let Some(log) = options.window_log
+                    && !(10..=31).contains(&log)
+                {
+                    return Err(RiegeliError::MalformedData(
+                        format!("window_log out of range for Zstd: {log} (valid: 10..=31)").into(),
+                    ));
+                }
             }
         }
 
@@ -343,6 +397,7 @@ impl<W: Write> RecordWriter<W> {
             accumulated_bytes: 0,
             pending_record_count: 0,
             closed: false,
+            failed: None,
         };
 
         // Write the optional FileMetadata chunk immediately after the signature chunk.
@@ -371,7 +426,8 @@ impl<W: Write> RecordWriter<W> {
 
     /// Write a single record.
     ///
-    /// Returns `Err(RiegeliError::WriterClosed)` if the writer has been closed.
+    /// Returns `Err(RiegeliError::WriterClosed)` if the writer has been closed,
+    /// and `Err(RiegeliError::WriterFailed)` if a previous operation failed.
     ///
     /// The flush policy mirrors the C++ reference (`WriteRecordImpl`): each
     /// record is accounted as its size plus 8 bytes (decoding a chunk stores
@@ -384,6 +440,12 @@ impl<W: Write> RecordWriter<W> {
         if self.closed {
             return Err(RiegeliError::WriterClosed);
         }
+        self.check_not_failed()?;
+        let result = self.write_record_impl(data);
+        self.latch_failure(result)
+    }
+
+    fn write_record_impl(&mut self, data: &[u8]) -> Result<(), RiegeliError> {
         let added_size = data.len() as u64 + 8;
         if self.accumulated_bytes + added_size > self.chunk_size && self.accumulated_bytes > 0 {
             self.flush_chunk()?;
@@ -408,6 +470,12 @@ impl<W: Write> RecordWriter<W> {
         if self.closed {
             return Ok(());
         }
+        self.check_not_failed()?;
+        let result = self.flush_impl();
+        self.latch_failure(result)
+    }
+
+    fn flush_impl(&mut self) -> Result<(), RiegeliError> {
         if self.pending_record_count > 0 {
             self.flush_chunk()?;
         }
@@ -428,19 +496,44 @@ impl<W: Write> RecordWriter<W> {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    /// Returns an error if a previous operation failed.
+    fn check_not_failed(&self) -> Result<(), RiegeliError> {
+        match &self.failed {
+            Some(msg) => Err(RiegeliError::WriterFailed(msg.clone().into())),
+            None => Ok(()),
+        }
+    }
+
+    /// Record the first failure so that all subsequent operations refuse to
+    /// write more bytes (mirroring the C++ `!ok()` guard on every entry point).
+    fn latch_failure(&mut self, result: Result<(), RiegeliError>) -> Result<(), RiegeliError> {
+        if let Err(e) = &result
+            && self.failed.is_none()
+        {
+            self.failed = Some(e.to_string());
+        }
+        result
+    }
+
     /// Flush pending records and mark the writer closed.
     fn flush_internal(&mut self) -> Result<(), RiegeliError> {
         if self.closed {
             return Ok(());
         }
         self.closed = true;
+        self.check_not_failed()?;
+        let result = self.flush_internal_impl();
+        self.latch_failure(result)
+    }
+
+    fn flush_internal_impl(&mut self) -> Result<(), RiegeliError> {
         if self.pending_record_count > 0 {
             self.flush_chunk()?;
         }
-        if self.initial_padding > 0 {
-            self.write_padding_to_multiple(self.initial_padding)?;
-        }
-        // final_padding also applies at close (after initial_padding).
+        // Like the C++ writer, only final_padding applies at close
+        // (`RecordWriterBase::Done` calls `MaybePadToFinalBoundary` only;
+        // initial_padding is applied solely when appending at a nonzero
+        // position, which this writer does not support).
         if self.final_padding > 0 {
             self.write_padding_to_multiple(self.final_padding)?;
         }
@@ -450,56 +543,19 @@ impl<W: Write> RecordWriter<W> {
     /// Write a padding chunk so that the file size becomes a multiple of `alignment`.
     ///
     /// The padding chunk has `ChunkType::Padding` and enough data bytes that the
-    /// total file size lands on an alignment boundary.
-    ///
-    /// Mirrors the C++ reference (`records_internal::PosAfterPadding` followed by
-    /// `DefaultChunkWriterBase::WritePadding`): the padded end position is the
-    /// smallest multiple of `alignment` that leaves room for the 40-byte chunk
-    /// header and is a possible chunk boundary (chunks cannot end at positions
-    /// whose block offset is 1..=24, i.e. inside the shadow of a block header).
+    /// total file size lands on an alignment boundary. The target position is
+    /// computed by [`pos_after_padding`], mirroring the C++ implementation
+    /// (`DefaultChunkWriterBase::WritePadding` in records/chunk_writer.cc).
     fn write_padding_to_multiple(&mut self, alignment: u64) -> Result<(), RiegeliError> {
-        // If already aligned, no chunk is written at all (early return below) —
-        // repeated padding calls on a settled file are free, which is what
-        // makes flush-then-close add no redundant chunks.
-        if alignment <= 1 {
-            return Ok(());
-        }
-
         let current = self.file_pos;
-
-        // If already aligned, no padding needed.
-        if current.is_multiple_of(alignment) {
+        let end_pos = pos_after_padding(current, alignment);
+        if end_pos == current {
             return Ok(());
         }
 
-        // Distance to the next multiple of `alignment`.
-        let mut length = alignment - current % alignment;
-
-        // Not enough space for the chunk header: go to the next multiple.
-        // Small alignments may need several steps — a single step (with a
-        // saturating fallback) used to yield a zero data size and overshoot
-        // the boundary, emitting padding that did not land on a multiple of
-        // the alignment at all.
-        while length < CHUNK_HEADER_SIZE {
-            length += alignment;
-        }
-
-        let mut end_pos = current + length;
-
-        // The padding chunk must end at a possible chunk boundary. Positions at
-        // block offset 1..=24 are inside / immediately after a block header (the
-        // C++ `IsPossibleChunkBoundary`: `RemainingInBlock(pos) < kUsableBlockSize`,
-        // which admits offset 0 and offsets >= 25).
-        while crate::block_arithmetic::remaining_in_block(end_pos) >= BLOCK_SIZE - BLOCK_HEADER_SIZE
-        {
-            end_pos += alignment;
-        }
-
-        // Padding data excludes the chunk header and any intervening block headers.
+        // Excludes the chunk header and any intervening block headers.
         let data_size = crate::block_arithmetic::distance_without_overhead(current, end_pos)
             - CHUNK_HEADER_SIZE;
-
-        // Build the padding data (all zeros).
         let padding_data = vec![0u8; data_size as usize];
         let padding_header = ChunkHeader::from_parts(&padding_data, ChunkType::Padding, 0, 0);
         self.write_chunk_raw(&padding_header, &padding_data)?;
@@ -636,6 +692,52 @@ impl<W: Write> RecordWriter<W> {
         }
 
         Ok(())
+    }
+}
+
+/// The position after writing a padding chunk at `pos` so that the resulting
+/// position is a multiple of `padding`. Returns `pos` unchanged when no padding
+/// chunk is needed.
+///
+/// This mirrors `records_internal::PosAfterPadding` (records/chunk_writer.cc):
+/// - the padded length is grown in `padding` steps until it can hold at least a
+///   chunk header (40 bytes);
+/// - the end position is then grown in `padding` steps while it is not a
+///   possible chunk boundary (inside or immediately after a block header; a
+///   block boundary itself is allowed — the block header belongs to the chunk).
+///
+/// One extra guard beyond C++: the end position is also grown while the span
+/// holds less than a chunk header of *usable* bytes (block headers interleaved
+/// in the span don't count). The C++ arithmetic underflows in that case
+/// (`DistanceWithoutOverhead(...) - ChunkHeader::size()` wraps); growing the
+/// span further keeps the file aligned without panicking.
+fn pos_after_padding(pos: u64, padding: u64) -> u64 {
+    if padding <= 1 {
+        return pos;
+    }
+    let remainder = pos % padding;
+    if remainder == 0 {
+        return pos;
+    }
+    let mut length = padding - remainder;
+    while length < CHUNK_HEADER_SIZE {
+        // Not enough space for the chunk header.
+        length += padding;
+    }
+    let mut end_pos = pos + length;
+    loop {
+        // C++ `IsPossibleChunkBoundary`: `RemainingInBlock(pos) < kUsableBlockSize`,
+        // i.e. block offset 0 (the block header belongs to the chunk) or >= 25.
+        let is_possible_chunk_boundary =
+            crate::block_arithmetic::remaining_in_block(end_pos) < BLOCK_SIZE - BLOCK_HEADER_SIZE;
+        if is_possible_chunk_boundary
+            && crate::block_arithmetic::distance_without_overhead(pos, end_pos) >= CHUNK_HEADER_SIZE
+        {
+            return end_pos;
+        }
+        // `end_pos` falls inside a block header, or the span has no room for
+        // the chunk header once interleaved block headers are excluded.
+        end_pos += padding;
     }
 }
 
@@ -1401,5 +1503,223 @@ mod tests {
         }
         assert_eq!(count, n + 1);
         assert_eq!(last, b"after-the-padding");
+    }
+
+    // -----------------------------------------------------------------------
+    // Once any operation fails, the writer stays failed — mirroring the C++
+    // writer, where every public entry point checks `ok()` and refuses to
+    // continue after a failure instead of writing more bytes at positions
+    // that no longer match the underlying stream.
+    // -----------------------------------------------------------------------
+
+    struct FailingSink {
+        written: usize,
+        fail_after: usize,
+    }
+
+    impl Write for FailingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written + buf.len() > self.fail_after {
+                return Err(std::io::Error::other("sink failed"));
+            }
+            self.written += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_latches_failure() {
+        // Accept exactly the 64-byte file header (block header + signature
+        // chunk header), then fail on the first data chunk.
+        let sink = FailingSink {
+            written: 0,
+            fail_after: 64,
+        };
+        let mut w = RecordWriter::new(sink, WriterOptions::new()).expect("signature fits");
+        w.write_record(b"hello").expect("record is buffered");
+        assert!(w.flush().is_err(), "flush must surface the sink error");
+        // The writer is now poisoned: it must not accept (and silently drop)
+        // further records, and a retried flush must not report success.
+        assert!(
+            w.write_record(b"more").is_err(),
+            "write_record after a failure must return an error"
+        );
+        assert!(
+            w.flush().is_err(),
+            "flush after a failure must return an error, not silently succeed"
+        );
+        assert!(
+            w.close().is_err(),
+            "close after a failure must return an error"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // write_padding_to_multiple mirrors the C++ records_internal::PosAfterPadding
+    // arithmetic (chunk_writer.cc), with an extra guard so that spans crossing a
+    // block boundary never leave less than a chunk header of usable space.
+    // -----------------------------------------------------------------------
+
+    /// Expected positions follow C++ `PosAfterPadding`:
+    /// pos 64, padding 17 → length 4 → bumped to 55 (>= chunk header) → end 119.
+    #[test]
+    fn padding_small_non_power_of_two_alignment() {
+        let data = write_file(&[], WriterOptions::new().final_padding(17));
+        assert_eq!(
+            data.len() % 17,
+            0,
+            "file must be a multiple of 17, got {} bytes",
+            data.len()
+        );
+        assert_eq!(data.len(), 119, "C++ PosAfterPadding(64, 17) == 119");
+    }
+
+    /// pos 64, padding 104: the gap is exactly one chunk header (40 bytes), so a
+    /// zero-data padding chunk is written, exactly as C++ does (no extra bump).
+    #[test]
+    fn padding_zero_data_chunk_when_gap_is_exactly_header() {
+        let data = write_file(&[], WriterOptions::new().final_padding(104));
+        assert_eq!(data.len(), 104, "C++ PosAfterPadding(64, 104) == 104");
+    }
+
+    fn writer_at(pos: u64) -> RecordWriter<std::io::Cursor<Vec<u8>>> {
+        let mut w =
+            RecordWriter::new(std::io::Cursor::new(Vec::new()), WriterOptions::new()).unwrap();
+        // Simulate a writer whose chunks ended at `pos`; only `file_pos` drives
+        // the padding arithmetic.
+        w.file_pos = pos;
+        w
+    }
+
+    /// pos 64, padding 65560: the first candidate end (65560) has block offset 24
+    /// — immediately after a block header — which C++ `IsPossibleChunkBoundary`
+    /// rejects, so the end is bumped by one more multiple to 131120.
+    #[test]
+    fn padding_end_inside_block_header_is_bumped() {
+        let mut w = writer_at(64);
+        w.write_padding_to_multiple(65560).unwrap();
+        assert_eq!(
+            w.file_pos, 131120,
+            "C++ PosAfterPadding(64, 65560) == 131120"
+        );
+        assert_eq!(w.file_pos % 65560, 0);
+    }
+
+    /// pos 65530, padding 60: the first candidate span (50 file bytes) crosses the
+    /// block boundary at 65536, leaving only 26 usable bytes — less than a chunk
+    /// header. The C++ arithmetic would underflow here; we extend to the next
+    /// multiple instead of panicking or wrapping.
+    #[test]
+    fn padding_span_crossing_block_header_does_not_underflow() {
+        let mut w = writer_at(65530);
+        w.write_padding_to_multiple(60).unwrap();
+        assert_eq!(w.file_pos % 60, 0);
+        assert_eq!(w.file_pos, 65640);
+    }
+
+    /// Same as above with a small alignment: pos 65530, padding 17 → candidate
+    /// span 56 bytes crosses the boundary (32 usable < 40), extended to 65603.
+    #[test]
+    fn padding_small_alignment_crossing_block_header() {
+        let mut w = writer_at(65530);
+        w.write_padding_to_multiple(17).unwrap();
+        assert_eq!(w.file_pos % 17, 0);
+        assert_eq!(w.file_pos, 65603);
+    }
+
+    // -----------------------------------------------------------------------
+    // Compression tuning options are validated eagerly at construction,
+    // matching the C++ `CompressorOptions` setters which assert the ranges
+    // at option-set time (compressor_options.h).
+    // -----------------------------------------------------------------------
+
+    fn try_new(options: WriterOptions) -> Result<(), RiegeliError> {
+        RecordWriter::new(std::io::Cursor::new(Vec::<u8>::new()), options).map(|_| ())
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn zstd_options_out_of_range_rejected_at_construction() {
+        // C++ ZstdWriterBase::Options: compression_level in -131072..=22,
+        // window_log in 10..=31 (64-bit build).
+        for level in [-131073, 23] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Zstd)
+                .compression_level(level);
+            assert!(
+                try_new(opts).is_err(),
+                "zstd compression_level({level}) must be rejected at construction"
+            );
+        }
+        for log in [9u32, 32] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Zstd)
+                .window_log(Some(log));
+            assert!(
+                try_new(opts).is_err(),
+                "zstd window_log({log}) must be rejected at construction"
+            );
+        }
+        // Boundary values are accepted.
+        for level in [-131072, 22] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Zstd)
+                .compression_level(level);
+            assert!(
+                try_new(opts).is_ok(),
+                "zstd compression_level({level}) is valid"
+            );
+        }
+        for log in [10u32, 31] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Zstd)
+                .window_log(Some(log));
+            assert!(try_new(opts).is_ok(), "zstd window_log({log}) is valid");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "brotli")]
+    fn brotli_options_out_of_range_rejected_at_construction() {
+        // C++ BrotliWriterBase::Options: compression_level in 0..=11,
+        // window_log in 10..=30. The Rust writer must reject out-of-range
+        // values instead of silently clamping them.
+        for level in [-1, 12] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Brotli)
+                .compression_level(level);
+            assert!(
+                try_new(opts).is_err(),
+                "brotli compression_level({level}) must be rejected at construction"
+            );
+        }
+        for log in [9u32, 31] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Brotli)
+                .window_log(Some(log));
+            assert!(
+                try_new(opts).is_err(),
+                "brotli window_log({log}) must be rejected at construction"
+            );
+        }
+        // Boundary values are accepted.
+        for level in [0, 11] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Brotli)
+                .compression_level(level);
+            assert!(
+                try_new(opts).is_ok(),
+                "brotli compression_level({level}) is valid"
+            );
+        }
+        for log in [10u32, 30] {
+            let opts = WriterOptions::new()
+                .compression(CompressionType::Brotli)
+                .window_log(Some(log));
+            assert!(try_new(opts).is_ok(), "brotli window_log({log}) is valid");
+        }
     }
 }

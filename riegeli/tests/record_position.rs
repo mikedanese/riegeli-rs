@@ -94,8 +94,9 @@ fn adv_15_window_log_accepted_for_brotli_and_zstd() {
 // Adversarial: final_padding with empty flush
 // ---------------------------------------------------------------------------
 
-/// final_padding and initial_padding can coexist. After close(), both padding
-/// policies are applied, and the file is still readable.
+/// final_padding and initial_padding can coexist. After close(), final_padding
+/// aligns the file size (initial_padding is a no-op on a fresh file, matching
+/// C++), and the file is still readable.
 #[test]
 fn adv_15_final_padding_and_initial_padding_coexist() {
     let records: Vec<Vec<u8>> = (0u32..5).map(|i| format!("rec-{i}").into_bytes()).collect();
@@ -112,7 +113,7 @@ fn adv_15_final_padding_and_initial_padding_coexist() {
             w.write_record(rec).expect("write ok");
         }
         w.flush().expect("flush ok");
-        // Drop triggers close() which also applies initial_padding and final_padding
+        // Drop triggers close() which applies final_padding
     }
 
     let size = buf.len() as u64;

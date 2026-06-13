@@ -13,6 +13,14 @@ pub enum RiegeliError {
     UnsupportedCompression(u8),
     /// The writer has been closed; no further writes are accepted.
     WriterClosed,
+    /// A previous writer operation failed; the writer no longer accepts writes.
+    ///
+    /// Once any write or flush fails, the underlying stream may hold a partial
+    /// chunk and the writer's position bookkeeping can no longer be trusted, so
+    /// the writer stays failed (matching the C++ implementation, where every
+    /// public entry point checks `ok()` first). The payload is the message of
+    /// the original error.
+    WriterFailed(Cow<'static, str>),
     /// An I/O error occurred.
     IoError(std::io::Error),
     /// An unrecognized `ChunkType` byte was encountered.
@@ -32,6 +40,9 @@ impl std::fmt::Display for RiegeliError {
                 write!(f, "unsupported compression type byte: {byte:#04x}")
             }
             RiegeliError::WriterClosed => write!(f, "writer has been closed"),
+            RiegeliError::WriterFailed(msg) => {
+                write!(f, "writer previously failed: {msg}")
+            }
             RiegeliError::IoError(e) => write!(f, "I/O error: {e}"),
             RiegeliError::UnknownChunkType(byte) => {
                 write!(f, "unknown chunk type byte: {byte:#04x}")
