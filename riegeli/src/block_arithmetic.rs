@@ -21,11 +21,7 @@ pub fn round_down_to_block_boundary(pos: u64) -> u64 {
 /// Returns `0` when `pos` is exactly at a block boundary (including `pos == 0`).
 pub fn remaining_in_block(pos: u64) -> u64 {
     let offset = pos % BLOCK_SIZE;
-    if offset == 0 {
-        0
-    } else {
-        BLOCK_SIZE - offset
-    }
+    if offset == 0 { 0 } else { BLOCK_SIZE - offset }
 }
 
 /// The usable (non-block-header) bytes per block.

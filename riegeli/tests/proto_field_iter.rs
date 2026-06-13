@@ -1,8 +1,8 @@
 //! Proto field iterator and public wire helper tests.
 
 use riegeli::proto::{
-    encode_tag, encode_varint32, encode_varint64, make_tag, serialize_field, FieldValue,
-    ProtoField, ProtoFieldIter, WireType,
+    FieldValue, ProtoField, ProtoFieldIter, WireType, encode_tag, encode_varint32, encode_varint64,
+    make_tag, serialize_field,
 };
 
 // ---------------------------------------------------------------------------

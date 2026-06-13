@@ -14,10 +14,10 @@ use std::io::Cursor;
 // against the CodSpeed compatibility layer instead of criterion proper.
 #[cfg(codspeed)]
 use codspeed_criterion_compat::{
-    criterion_group, criterion_main, Criterion, SamplingMode, Throughput,
+    Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 #[cfg(not(codspeed))]
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 
 use riegeli::{
     CompressionType, Field, FieldProjection, ReaderOptions, RecordReader, RecordWriter,

@@ -25,14 +25,14 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::chunk_header::{ChunkHeader, ChunkType};
 use crate::compression::{
-    compress_length_prefixed, compress_with_prefix, CompressOptions, CompressionType,
+    CompressOptions, CompressionType, compress_length_prefixed, compress_with_prefix,
 };
 use crate::error::RiegeliError;
-use crate::proto::{is_proto_message, tag_field_number, tag_wire_type, WireType};
+use crate::proto::{WireType, is_proto_message, tag_field_number, tag_wire_type};
 use crate::simple_chunk::Chunk;
 use crate::transpose::internal::{
-    has_data_buffer, has_subtype, message_id, subtype, MAX_RECURSION_DEPTH, MAX_VARINT_INLINE,
-    SUBMESSAGE_WIRE_TYPE,
+    MAX_RECURSION_DEPTH, MAX_VARINT_INLINE, SUBMESSAGE_WIRE_TYPE, has_data_buffer, has_subtype,
+    message_id, subtype,
 };
 use crate::varint::{decode_u32, decode_u64, encode_u32, encode_u64};
 
@@ -2769,8 +2769,7 @@ mod tests {
         assert_eq!(data[0], compression as u8);
         let (blob_len, consumed) = decode_u64(&data[1..]).expect("header blob length");
         let blob = &data[1 + consumed..1 + consumed + blob_len as usize];
-        let header_bytes =
-            decompress_with_prefix(blob, compression).expect("decompress header");
+        let header_bytes = decompress_with_prefix(blob, compression).expect("decompress header");
         let (num_buckets, _) = decode_u32(&header_bytes).expect("num_buckets");
         num_buckets
     }

@@ -33,7 +33,7 @@ fn varint_field_u64_max() {
     // tag=0x08, then 10-byte varint for u64::MAX
     assert_eq!(bytes[0], 0x08);
     assert_eq!(bytes.len(), 11); // 1 tag + 10 varint bytes
-                                 // Verify round-trip
+    // Verify round-trip
     let fields: Vec<_> = ProtoFieldIter::new(&bytes)
         .collect::<Result<_, _>>()
         .unwrap();

@@ -84,19 +84,38 @@ impl FieldProjection {
     }
 
     /// Add a field to this projection and return `self` for chaining.
+    ///
+    /// Adding a field is purely additive: it can only widen the include set,
+    /// never narrow it. In particular `all().add_field(...)` still includes
+    /// all fields, matching C++ `FieldProjection::All().AddField(...)` where
+    /// `All()` is represented as a projection containing one empty-path
+    /// field that persists across `AddField` calls.
     pub fn add_field(mut self, field: Field) -> Self {
         if let Some(ref mut fields) = self.fields {
             fields.push(field);
         } else {
-            // Was all() — switch to filtered mode with this field.
-            self.fields = Some(vec![field]);
+            // Was all() — materialize the C++ representation of All(): an
+            // explicit empty-path (include-everything) field, kept alongside
+            // the added field so the projection still includes all fields.
+            self.fields = Some(vec![Field::new(Vec::new()), field]);
         }
         self
     }
 
     /// Returns `true` if this is an all-fields (pass-through) projection.
+    ///
+    /// Mirrors C++ `FieldProjection::includes_all()`: true if any field's
+    /// path is empty (the root message is included). An empty-path
+    /// existence-only field does not count — it corresponds to a C++ path of
+    /// `{kExistenceOnly}`, which the reference ignores rather than treating
+    /// as include-everything.
     pub fn is_all(&self) -> bool {
-        self.fields.is_none()
+        match &self.fields {
+            None => true,
+            Some(fields) => fields
+                .iter()
+                .any(|f| f.path.is_empty() && !f.existence_only),
+        }
     }
 
     /// Returns the list of explicitly projected fields, or `None` if all fields.
@@ -104,14 +123,6 @@ impl FieldProjection {
         self.fields.as_deref()
     }
 
-    /// True if `field_number` appears anywhere in any projected path (or the
-    /// projection includes everything).
-    ///
-    /// Used by transpose buffer pruning: nested fields' states carry the
-    /// INNER field's tag, so pruning by top-level field number alone starves
-    /// the buffers behind paths of length >= 2 and their values silently
-    /// decode as zeros. Matching at any depth is conservative — it may keep
-    /// a buffer that projection later drops, but it can never starve one.
     /// True when any path's terminal include is a full include (not
     /// existence-only): the subtree under that terminus is included
     /// wholesale, so fields inside it carry no mention of their own and
@@ -123,6 +134,14 @@ impl FieldProjection {
         }
     }
 
+    /// True if `field_number` appears anywhere in any projected path (or the
+    /// projection includes everything).
+    ///
+    /// Used by transpose buffer pruning: nested fields' states carry the
+    /// INNER field's tag, so pruning by top-level field number alone starves
+    /// the buffers behind paths of length >= 2 and their values silently
+    /// decode as zeros. Matching at any depth is conservative — it may keep
+    /// a buffer that projection later drops, but it can never starve one.
     pub(crate) fn mentions_field(&self, field_number: u32) -> bool {
         match &self.fields {
             None => true,
@@ -164,6 +183,42 @@ mod tests {
             .add_field(Field::new(vec![1]).existence_only())
             .add_field(Field::new(vec![2, 3]).existence_only());
         assert!(!eo.has_full_include());
+    }
+
+    #[test]
+    fn all_add_field_still_includes_all() {
+        // C++ `FieldProjection::All()` is a projection containing one
+        // empty-path field, and `AddField` is purely additive:
+        // `All().AddField({1})` still has `includes_all() == true`.
+        let proj = FieldProjection::all().add_field(Field::new(vec![1]));
+        assert!(
+            proj.is_all(),
+            "all().add_field(...) must still include all fields"
+        );
+        let fields = proj.fields().expect("explicit field list after add_field");
+        assert_eq!(fields.len(), 2);
+        assert!(fields[0].path.is_empty(), "the include-all member persists");
+        assert_eq!(fields[1].path, vec![1]);
+        // The include-all member keeps every field mentioned and pruning off.
+        assert!(proj.mentions_field(2));
+        assert!(proj.has_full_include());
+
+        // default() is all(), so the incremental pattern must not narrow either.
+        let proj = FieldProjection::default().add_field(Field::new(vec![3, 4]));
+        assert!(proj.is_all());
+    }
+
+    #[test]
+    fn empty_path_field_means_include_all() {
+        // An explicit empty-path full include is C++'s include-everything
+        // marker: `includes_all()` is true if any field has an empty path.
+        let proj = FieldProjection::new().add_field(Field::new(vec![]));
+        assert!(proj.is_all());
+
+        // An empty-path existence-only field maps to C++ path `{0}`, which
+        // the reference ignores (it does not include everything).
+        let proj = FieldProjection::new().add_field(Field::new(vec![]).existence_only());
+        assert!(!proj.is_all());
     }
 
     #[test]

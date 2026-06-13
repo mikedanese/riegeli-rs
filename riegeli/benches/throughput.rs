@@ -36,10 +36,10 @@ use std::io::Cursor;
 // layer does not provide (and instrumented runs have no use for it anyway).
 #[cfg(codspeed)]
 use codspeed_criterion_compat::{
-    criterion_group, criterion_main, Criterion, SamplingMode, Throughput,
+    Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 #[cfg(not(codspeed))]
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 #[cfg(not(codspeed))]
 use pprof::criterion::{Output, PProfProfiler};
 
@@ -74,7 +74,7 @@ fn make_records() -> Vec<Vec<u8>> {
             // Field 2 (tag=0x12, length-delimited): padding to fill RECORD_SIZE
             rec.push(0x12);
             let remaining = RECORD_SIZE.saturating_sub(rec.len() + 2); // 2 bytes for tag + length
-                                                                       // length as varint (will be < 128 for typical sizes, but handle >127)
+            // length as varint (will be < 128 for typical sizes, but handle >127)
             let len = remaining;
             if len < 0x80 {
                 rec.push(len as u8);
