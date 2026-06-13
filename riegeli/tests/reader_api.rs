@@ -119,6 +119,76 @@ fn seek_back_returns_previous_record() {
     assert_eq!(re_read, fifth, "seek_back should re-read the 5th record");
 }
 
+/// Repeated seek_back() calls walk backward through the whole file, one
+/// record per call, crossing chunk boundaries (C++ SeekBack: SetIndex(i-1)
+/// within the chunk, SeekToChunkBefore across chunks).
+#[test]
+fn seek_back_iterates_backward_across_chunks() {
+    let records: Vec<Vec<u8>> = (0u64..10).map(|i| i.to_le_bytes().to_vec()).collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
+    // One record per chunk, so stepping back crosses a chunk boundary each time.
+    let data = write_records(&record_refs, WriterOptions::new().chunk_size(1));
+    let mut reader = open_reader(data);
+
+    // Read everything; the reader is at end of file.
+    while reader.read_record().expect("read").is_some() {}
+
+    // One seek_back: re-read the last record.
+    assert!(reader.seek_back().expect("seek_back"));
+    let rec = reader.read_record().expect("read").expect("record");
+    assert_eq!(rec, records[9], "first seek_back lands on the last record");
+
+    // Backward iteration: after reading record i, two seek_backs position
+    // before record i-1.
+    for i in (0..9).rev() {
+        assert!(
+            reader.seek_back().expect("seek_back"),
+            "undo read of {}",
+            i + 1
+        );
+        assert!(reader.seek_back().expect("seek_back"), "step back to {i}");
+        let rec = reader.read_record().expect("read").expect("record");
+        assert_eq!(rec, records[i], "backward iteration must yield record {i}");
+    }
+
+    // After reading record 0: one more seek_back positions before record 0
+    // again; the next returns false (nothing before the first record).
+    assert!(reader.seek_back().expect("seek_back"));
+    assert!(
+        !reader.seek_back().expect("seek_back"),
+        "no record exists before the first record"
+    );
+}
+
+/// seek_back() after an intervening seek() steps back from the SEEK target,
+/// not to the last-read record (C++ SeekBack is positional).
+#[test]
+fn seek_back_after_seek_steps_back_from_seek_target() {
+    let records: Vec<Vec<u8>> = (0u64..10).map(|i| i.to_le_bytes().to_vec()).collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
+    // All records in one chunk.
+    let data = write_records(&record_refs, WriterOptions::new().chunk_size(1 << 20));
+    let mut reader = open_reader(data);
+
+    // Read all 10 records (last_pos is now record 9's position).
+    let mut chunk_begin = None;
+    while reader.read_record().expect("read").is_some() {
+        chunk_begin.get_or_insert(reader.last_pos().chunk_begin);
+    }
+    let chunk_begin = chunk_begin.expect("read at least one record");
+
+    // Seek before record 3, then step back: the next read must be record 2.
+    reader
+        .seek(riegeli::RecordPosition::new(chunk_begin, 3))
+        .expect("seek");
+    assert!(reader.seek_back().expect("seek_back"));
+    let rec = reader.read_record().expect("read").expect("record");
+    assert_eq!(
+        rec, records[2],
+        "seek_back after seek must step back from the seek target"
+    );
+}
+
 /// seek_back() at the very first record returns Ok(false).
 #[test]
 fn seek_back_at_start_returns_false() {
