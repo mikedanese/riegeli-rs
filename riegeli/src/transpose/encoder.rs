@@ -1563,7 +1563,13 @@ impl TransposeChunkEncoder {
             .map_err(|e| RiegeliError::MalformedData(format!("length: {e}").into()))?;
         *pos += llen;
         let value_pos = *pos;
-        let value_end = *pos + length as usize;
+        // Checked add: `length` is attacker-controlled (up to u32::MAX); on
+        // a 32-bit target a wrapping add would produce `value_end` smaller
+        // than `value_pos`, pass the `current_end` check, and make the
+        // slices below panic.
+        let value_end = pos
+            .checked_add(length as usize)
+            .ok_or_else(|| RiegeliError::MalformedData("length-delimited field overflow".into()))?;
 
         if value_end > current_end {
             return Err(RiegeliError::MalformedData(
@@ -1949,6 +1955,26 @@ mod tests {
         assert_eq!(result[0], r0);
         assert_eq!(result[1], r1);
         assert_eq!(result[2], r2);
+    }
+
+    #[test]
+    fn test_hostile_lengths_classified_nonproto_and_roundtrip() {
+        // Records C++ classifies as non-proto and stores as plain strings:
+        // - field 2 LengthDelimited declaring a near-u32::MAX length
+        //   (C++ `record.Skip(length)` fails; an unchecked `pos + length`
+        //   would wrap on 32-bit),
+        // - field 1 varint whose 10-byte encoding overflows u64
+        //   (C++ `SkipVarint` rejects a last byte >= 2).
+        // Both must round-trip byte-for-byte as string records, not error
+        // or panic.
+        let huge_length: &[u8] = &[0x12, 0xFA, 0xFF, 0xFF, 0xFF, 0x0F];
+        let overflow_varint: &[u8] = &[
+            0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
+        ];
+        let result = roundtrip(&[huge_length, overflow_varint], CompressionType::None);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], huge_length);
+        assert_eq!(result[1], overflow_varint);
     }
 
     // -------------------------------------------------------------------

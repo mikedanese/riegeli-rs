@@ -198,6 +198,20 @@ pub(crate) fn decompress_zstd(input: &[u8], max_len: u64) -> Result<Vec<u8>, Rie
     let mut decoder = zstd::stream::read::Decoder::with_buffer(cursor)
         .map_err(|e| RiegeliError::MalformedData(format!("zstd decompress error: {e}").into()))?
         .single_frame();
+    // Raise the window limit to the full range writers can produce
+    // (window_log up to 31), like the C++ ZstdReader:
+    // `ZSTD_DCtx_setParameter(ZSTD_d_windowLogMax,
+    // sizeof(size_t) == 4 ? 30 : 31)`. libzstd's default limit of 27 would
+    // reject valid frames as "requires too much memory"; the output cap
+    // below still bounds what we materialize.
+    let window_log_max: u32 = if cfg!(target_pointer_width = "32") {
+        30
+    } else {
+        31
+    };
+    decoder
+        .window_log_max(window_log_max)
+        .map_err(|e| RiegeliError::MalformedData(format!("zstd window_log_max: {e}").into()))?;
     let mut output = Vec::with_capacity(max_len.min(MAX_DECOMPRESS_PREALLOC) as usize);
     (&mut decoder)
         .take(max_len.saturating_add(1))
@@ -534,5 +548,50 @@ mod tests {
             result.is_err(),
             "trailing bytes after the Snappy data must be rejected, got {result:?}"
         );
+    }
+
+    /// C++ `ZstdReaderBase::Initialize` raises the decoder window limit to
+    /// the full range the writer can produce
+    /// (`ZSTD_DCtx_setParameter(ZSTD_d_windowLogMax, sizeof(size_t) == 4 ? 30 : 31)`),
+    /// so files written with `window_log` up to 31 are readable. The Rust
+    /// decoder must do the same instead of libzstd's default limit of 27.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_large_window_log_roundtrips() {
+        let input = vec![7u8; 4096];
+        for window_log in [28u32, 30] {
+            let compressed = compress_zstd(
+                &input,
+                CompressOptions {
+                    level: None,
+                    window_log: Some(window_log),
+                },
+            )
+            .expect("compress");
+            let out =
+                decompress_data_capped(&compressed, CompressionType::Zstd, input.len() as u64)
+                    .unwrap_or_else(|e| {
+                        panic!("zstd window_log {window_log} stream failed to decompress: {e}")
+                    });
+            assert_eq!(out, input);
+        }
+    }
+
+    /// C++ `BrotliReaderBase::Initialize` unconditionally enables
+    /// `BROTLI_DECODER_PARAM_LARGE_WINDOW`, so streams written with
+    /// `window_log` 25..=30 (which C++ writers emit in large-window mode)
+    /// are readable.
+    #[cfg(feature = "brotli")]
+    #[test]
+    fn brotli_large_window_stream_decompresses() {
+        let input = vec![3u8; 4096];
+        let mut params = brotli::enc::BrotliEncoderParams::default();
+        params.lgwin = 28;
+        params.large_window = true;
+        let mut compressed = Vec::new();
+        brotli::BrotliCompress(&mut &input[..], &mut compressed, &params).expect("compress");
+        let out = decompress_data_capped(&compressed, CompressionType::Brotli, input.len() as u64)
+            .expect("large-window brotli stream failed to decompress");
+        assert_eq!(out, input);
     }
 }
