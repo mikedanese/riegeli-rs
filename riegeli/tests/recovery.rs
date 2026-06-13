@@ -333,3 +333,39 @@ fn adv_all_byte_values_per_record_cpp_write_rust_read() {
         rust_read,
     );
 }
+
+/// Regression: a file of exactly one block plus a block header (so EOF sits
+/// on the boundary+24 alias address) once produced overlapping recovery
+/// regions — the second region's canonicalized begin stepped 24 bytes back
+/// inside the first. Regions reported during forward reads must be nonempty
+/// and non-overlapping.
+#[test]
+fn recovery_regions_stay_monotone_on_alias_eof_file() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/regression/recovery_regions_alias.riegeli"
+    ))
+    .expect("regression input");
+
+    let regions: Rc<RefCell<Vec<(u64, u64)>>> = Rc::default();
+    let sink = regions.clone();
+    let opts = riegeli::ReaderOptions::new().recovery(move |reg| {
+        sink.borrow_mut().push((reg.begin(), reg.end()));
+        true
+    });
+    let Ok(mut reader) = riegeli::RecordReader::new(std::io::Cursor::new(bytes), opts) else {
+        return; // construction may fail without a callback verdict; fine
+    };
+    while let Ok(Some(_)) = reader.read_record() {}
+
+    let regs = regions.borrow();
+    let mut last_end = 0u64;
+    for &(b, e) in regs.iter() {
+        assert!(b < e, "empty region in {regs:?}");
+        assert!(b >= last_end, "regions moved backward: {regs:?}");
+        last_end = e;
+    }
+}
