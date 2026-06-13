@@ -1246,6 +1246,16 @@ impl<R: Read + Seek> RecordReader<R> {
         let trusted_end = self.pending_trusted_end.take();
         self.recovery.as_ref()?;
         let begin = crate::block_arithmetic::canonical_chunk_address(at);
+        // Canonicalizing a boundary+24 failure address steps 24 bytes back
+        // across the block header — bytes the PREVIOUS region already covers
+        // when its resync landed exactly on that alias (a block header whose
+        // next_chunk is 24). Clamp to the previous region's end so regions
+        // reported during forward reads never overlap; an explicit backward
+        // seek has prev.end() > at and is unaffected.
+        let begin = match &self.last_skipped_region {
+            Some(prev) if prev.end() <= at && begin < prev.end() => prev.end(),
+            _ => begin,
+        };
         let end = match trusted_end {
             // The failing chunk's extent was trustworthy WHEN it failed
             // (hash-valid header, stream-bounded claims): skip exactly it.
@@ -4388,5 +4398,56 @@ mod tests {
             None
         );
         assert_eq!(*count.borrow(), 1, "the callback saw the region");
+    }
+
+    /// Regions reported during forward reads must never overlap, including
+    /// across the block-header alias: a resync via a block header whose
+    /// next_chunk is 24 ends a region at boundary+24, and a failure right
+    /// there canonicalizes back to the boundary — 24 bytes the previous
+    /// region already covered.
+    #[test]
+    fn recovery_regions_never_overlap_at_block_header_alias() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // A chunk whose hash-valid header claims data ending exactly at the
+        // 64 KiB boundary has a trusted extent of boundary+24 = 65560. Its
+        // data hash mismatches, so region one is [64, 65560). The truncated
+        // byte at 65560 then fails at exactly the alias address, whose
+        // canonical chunk address is the boundary — 24 bytes back inside
+        // region one.
+        use crate::chunk_header::{ChunkHeader, ChunkType};
+        let mut bytes = Vec::with_capacity(65561);
+        bytes.extend_from_slice(&BlockHeader::from_parts(0, 24).to_bytes());
+        bytes.extend_from_slice(
+            &ChunkHeader::from_parts(&[], ChunkType::FileSignature, 0, 0).to_bytes(),
+        );
+        // Forged header: hashes computed over ones, file carries zeros.
+        let claimed = vec![1u8; 65432]; // data spans [104, 65536) — ends at the boundary
+        bytes.extend_from_slice(
+            &ChunkHeader::from_parts(&claimed, ChunkType::Simple, 1, 100).to_bytes(),
+        );
+        bytes.extend_from_slice(&vec![0u8; 65432]);
+        assert_eq!(bytes.len(), 65536);
+        bytes.extend_from_slice(&BlockHeader::from_parts(65472, 24).to_bytes());
+        bytes.push(0xFF);
+
+        let regions: Rc<RefCell<Vec<(u64, u64)>>> = Rc::default();
+        let sink = regions.clone();
+        let opts = ReaderOptions::new().recovery(move |reg: &crate::SkippedRegion| {
+            sink.borrow_mut().push((reg.begin(), reg.end()));
+            true
+        });
+        let mut reader = RecordReader::new(Cursor::new(bytes), opts).expect("recoverable preamble");
+        while let Ok(Some(_)) = reader.read_record() {}
+
+        let regs = regions.borrow();
+        assert!(regs.len() >= 2, "expected two regions, got {regs:?}");
+        let mut last_end = 0u64;
+        for &(b, e) in regs.iter() {
+            assert!(b < e, "empty region in {regs:?}");
+            assert!(b >= last_end, "regions moved backward: {regs:?}");
+            last_end = e;
+        }
     }
 }
