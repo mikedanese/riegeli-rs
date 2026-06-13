@@ -449,6 +449,57 @@ fn test_size_does_not_discard_projection() {
     );
 }
 
+/// set_field_projection documents that the projection takes effect at the
+/// NEXT chunk boundary: the current chunk's decoder continues with the old
+/// projection until exhausted. A position-preserving scan like size() must
+/// not break that timing by re-decoding the current chunk under the new
+/// projection mid-flight.
+#[test]
+fn set_field_projection_timing_survives_size() {
+    // 10 records with fields 1 and 2, all in one transposed chunk.
+    let records: Vec<Vec<u8>> = (0..10u64)
+        .map(|i| {
+            let mut r = Vec::new();
+            r.extend_from_slice(&encode_varint_field(1, i + 1));
+            r.extend_from_slice(&encode_varint_field(2, i * 5));
+            r
+        })
+        .collect();
+    let record_refs: Vec<&[u8]> = records.iter().map(|r| r.as_slice()).collect();
+    let opts = WriterOptions::new()
+        .transpose(true)
+        .compression(CompressionType::None);
+    let data = write_records(&record_refs, opts);
+
+    // Open with NO projection; read half the chunk.
+    let mut reader =
+        RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("reader new ok");
+    for i in 0..5 {
+        let rec = reader.read_record().expect("read ok").expect("record");
+        assert_eq!(
+            proto_field_numbers(&rec),
+            vec![1, 2],
+            "record {i} has both fields before the switch"
+        );
+    }
+
+    // Switch the projection mid-chunk, then call size(). The switch takes
+    // effect at the next chunk boundary; size() must not advance it.
+    reader.set_field_projection(FieldProjection::new().add_field(Field::new(vec![1])));
+    assert_eq!(reader.size().expect("size ok"), 10);
+
+    // The remaining records of the CURRENT chunk still carry both fields.
+    for i in 5..10 {
+        let rec = reader.read_record().expect("read ok").expect("record");
+        assert_eq!(
+            proto_field_numbers(&rec),
+            vec![1, 2],
+            "record {i}: the current chunk keeps the old projection across size()"
+        );
+    }
+    assert_eq!(reader.read_record().expect("read ok"), None);
+}
+
 // ---------------------------------------------------------------------------
 // Excluded submessage sibling is skipped; output is byte-exact
 // ---------------------------------------------------------------------------

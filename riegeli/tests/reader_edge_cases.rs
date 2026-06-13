@@ -8,8 +8,8 @@
 )]
 use std::io::Cursor;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use riegeli::{CompressionType, ReaderOptions, RecordReader, RecordWriter, WriterOptions};
@@ -95,32 +95,34 @@ fn check_file_format_mid_read_preserves_state() {
     assert_eq!(reader.read_record().expect("eof"), None);
 }
 
-// ── D: seek_back() twice in a row stays on the last-read record ──────────────
+// ── D: seek_back() is positional — each call steps one record back ───────────
 #[test]
-fn seek_back_twice_stays_on_same_record() {
+fn seek_back_twice_steps_back_two_records() {
     let records: Vec<Vec<u8>> = (0u32..5).map(|i| i.to_le_bytes().to_vec()).collect();
     let record_refs: Vec<&[u8]> = records.iter().map(|v| v.as_slice()).collect();
     let data = write_records(&record_refs, WriterOptions::new());
     let mut reader = open_reader(data);
 
-    // Read 3 records (records 0, 1, 2).
+    // Read 3 records (records 0, 1, 2); the position is now before record 3.
     for _ in 0..3 {
         reader.read_record().expect("read").expect("got record");
     }
 
-    // seek_back() once: repositions at record 2.
+    // seek_back() once: repositions before record 2.
     let r1 = reader.seek_back().expect("seek_back 1");
     assert!(r1, "first seek_back should return true");
 
-    // seek_back() again: last_pos after the first seek is still record 2.
+    // seek_back() again: one more step back, before record 1 (C++ SeekBack
+    // steps from the CURRENT position, it does not re-target the last-read
+    // record).
     let r2 = reader.seek_back().expect("seek_back 2");
     assert!(r2, "second seek_back should return true");
 
-    // The next read should return record 2 again.
+    // The next read should return record 1.
     let re_read = reader.read_record().expect("re-read").expect("got record");
     assert_eq!(
-        re_read, records[2],
-        "double seek_back should re-read record 2"
+        re_read, records[1],
+        "two seek_backs from before record 3 must land before record 1"
     );
 }
 

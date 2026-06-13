@@ -246,7 +246,8 @@ fn seek_numeric_into_boundary_coincident_chunk() {
 
     // seek_numeric to record 5 of the boundary-coincident chunk:
     // numeric = canonical chunk_begin + record_index = 131072 + 5.
-    let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("new ok");
+    let mut reader =
+        RecordReader::new(Cursor::new(data.clone()), ReaderOptions::new()).expect("new ok");
     reader.seek_numeric(boundary + 5).expect("seek_numeric ok");
     let rec = reader
         .read_record()
@@ -255,5 +256,31 @@ fn seek_numeric_into_boundary_coincident_chunk() {
     assert_eq!(
         rec, b"r5",
         "seek_numeric(boundary+5) must land on record 5 of the boundary-coincident chunk"
+    );
+
+    // Seeking via the alias address (boundary + 24, the first physical
+    // header byte) resolves to the same chunk AND reports the canonical
+    // address in pos(): positions are stored and compared in canonical
+    // form, so an alias seek must not produce a pos() that disagrees with
+    // last_pos()/sequential reads of the same record by 24.
+    let mut reader = RecordReader::new(Cursor::new(data), ReaderOptions::new()).expect("new ok");
+    reader
+        .seek(riegeli::RecordPosition::new(boundary + 24, 0))
+        .expect("alias seek ok");
+    assert_eq!(
+        reader.pos(),
+        riegeli::RecordPosition::new(boundary, 0),
+        "pos() after an alias seek reports the canonical chunk address"
+    );
+    assert_eq!(reader.pos().numeric(), boundary);
+    let rec = reader
+        .read_record()
+        .expect("read after alias seek ok")
+        .expect("record expected");
+    assert_eq!(rec, b"r0");
+    assert_eq!(
+        reader.last_pos(),
+        riegeli::RecordPosition::new(boundary, 0),
+        "last_pos agrees with the canonicalized seek position"
     );
 }
