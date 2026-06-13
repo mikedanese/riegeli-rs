@@ -316,11 +316,138 @@ pub fn is_proto_message(data: &[u8]) -> bool {
     started_groups.is_empty()
 }
 
+/// Returns `true` if `data` parses as a protobuf message under the permissive
+/// rules of standard proto parsers, which accept non-canonical (overlong)
+/// varint encodings that [`is_proto_message`] rejects.
+///
+/// This distinguishes records that are merely encoded non-canonically — still
+/// a valid message to every downstream proto parser — from records that are
+/// not protobuf data at all. The streaming field filter uses it to refuse to
+/// pass the former through unfiltered.
+pub(crate) fn is_parseable_proto_message(data: &[u8]) -> bool {
+    let mut pos: usize = 0;
+    let mut started_groups: Vec<u32> = Vec::new();
+
+    while pos < data.len() {
+        // Read the tag, accepting overlong encodings. Tags fit in 32 bits
+        // (field number <= 2^29 - 1 plus 3 wire-type bits).
+        let Ok((tag, consumed)) = varint::decode_u64(&data[pos..]) else {
+            return false;
+        };
+        if tag > u64::from(u32::MAX) {
+            return false;
+        }
+        let tag = tag as u32;
+        pos += consumed;
+
+        let field_number = tag_field_number(tag);
+        if field_number == 0 {
+            return false;
+        }
+
+        let Some(wire_type) = tag_wire_type(tag) else {
+            return false;
+        };
+
+        match wire_type {
+            WireType::Varint => match varint::decode_u64(&data[pos..]) {
+                Ok((_, consumed)) => pos += consumed,
+                Err(_) => return false,
+            },
+            WireType::Fixed32 => {
+                if data.len() - pos < 4 {
+                    return false;
+                }
+                pos += 4;
+            }
+            WireType::Fixed64 => {
+                if data.len() - pos < 8 {
+                    return false;
+                }
+                pos += 8;
+            }
+            WireType::LengthDelimited => {
+                let Ok((length, consumed)) = varint::decode_u64(&data[pos..]) else {
+                    return false;
+                };
+                pos += consumed;
+                if length > (data.len() - pos) as u64 {
+                    return false;
+                }
+                pos += length as usize;
+            }
+            WireType::StartGroup => started_groups.push(field_number),
+            WireType::EndGroup => {
+                if started_groups.last() != Some(&field_number) {
+                    return false;
+                }
+                started_groups.pop();
+            }
+        }
+    }
+
+    started_groups.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ---- tag composition/decomposition ----
+
+    // ---- is_parseable_proto_message (permissive spec-level walk) ----
+
+    #[test]
+    fn test_parseable_accepts_overlong_varint_value() {
+        // Field 1 = varint 0 encoded in two bytes, then field 2 = bytes
+        // "secret". Strict canonical validation rejects this, but every
+        // standard proto parser accepts it.
+        let mut data = vec![0x08, 0x80, 0x00, 0x12, 0x06];
+        data.extend_from_slice(b"secret");
+        assert!(!is_proto_message(&data));
+        assert!(is_parseable_proto_message(&data));
+    }
+
+    #[test]
+    fn test_parseable_accepts_overlong_tag() {
+        // Tag 0x08 (field 1, varint) encoded in two bytes [0x88, 0x00],
+        // followed by varint value 7.
+        let data = [0x88, 0x00, 0x07];
+        assert!(!is_proto_message(&data));
+        assert!(is_parseable_proto_message(&data));
+    }
+
+    #[test]
+    fn test_parseable_accepts_everything_canonical_accepts() {
+        let mut data = Vec::new();
+        encode_tag(&mut data, 1, WireType::Varint);
+        encode_varint64(&mut data, 150);
+        encode_tag(&mut data, 2, WireType::LengthDelimited);
+        encode_varint32(&mut data, 3);
+        data.extend_from_slice(b"abc");
+        encode_tag(&mut data, 3, WireType::StartGroup);
+        encode_tag(&mut data, 4, WireType::Fixed32);
+        data.extend_from_slice(&7u32.to_le_bytes());
+        encode_tag(&mut data, 3, WireType::EndGroup);
+        assert!(is_proto_message(&data));
+        assert!(is_parseable_proto_message(&data));
+    }
+
+    #[test]
+    fn test_parseable_rejects_non_proto_data() {
+        // Wire type 7 in the first tag: not proto under any parser.
+        assert!(!is_parseable_proto_message(&[0x0F, 0xFF, 0x00]));
+        // Field number 0.
+        assert!(!is_parseable_proto_message(&[0x00]));
+        // Truncated length-delimited field.
+        assert!(!is_parseable_proto_message(&[0x12, 0x05, b'a']));
+        // Unclosed group.
+        assert!(!is_parseable_proto_message(&[0x0B]));
+        // Mismatched end-group.
+        assert!(!is_parseable_proto_message(&[0x0B, 0x14]));
+        // Truncated varint value.
+        assert!(!is_parseable_proto_message(&[0x08, 0x80]));
+    }
 
     #[test]
     fn test_make_tag_and_decompose() {
