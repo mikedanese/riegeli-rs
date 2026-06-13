@@ -33,44 +33,62 @@ fn read_all(data: Vec<u8>) -> Vec<Vec<u8>> {
 const BLOCK_SIZE: u64 = 65536;
 
 // -----------------------------------------------------------------------
-// initial_padding(65536) produces file_size % 65536 == 0
+// initial_padding is a no-op for a fresh file: the C++ writer applies it
+// only when appending at a nonzero position (Worker::Initialize), and the
+// close path pads with final_padding only (Done → MaybePadToFinalBoundary).
+// This writer always starts a fresh file, so initial_padding writes nothing.
 // -----------------------------------------------------------------------
 
 #[test]
-fn initial_padding_aligns_empty_file() {
-    let data = write_records(&[], WriterOptions::new().initial_padding(BLOCK_SIZE));
+fn initial_padding_is_noop_for_fresh_file() {
+    let records: &[&[u8]] = &[b"hello", b"world"];
+    let with_padding = write_records(records, WriterOptions::new().initial_padding(BLOCK_SIZE));
+    let without_padding = write_records(records, WriterOptions::new());
+    assert_eq!(
+        with_padding, without_padding,
+        "initial_padding must not change the bytes of a fresh file"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Criterion 7.2: final_padding(65536) produces file_size % 65536 == 0
+// -----------------------------------------------------------------------
+
+#[test]
+fn final_padding_aligns_empty_file() {
+    let data = write_records(&[], WriterOptions::new().final_padding(BLOCK_SIZE));
     assert_eq!(
         data.len() as u64 % BLOCK_SIZE,
         0,
-        "empty file with initial_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
+        "empty file with final_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
         data.len()
     );
 }
 
 #[test]
-fn initial_padding_aligns_small_file() {
+fn final_padding_aligns_small_file() {
     let data = write_records(
         &[b"hello", b"world"],
-        WriterOptions::new().initial_padding(BLOCK_SIZE),
+        WriterOptions::new().final_padding(BLOCK_SIZE),
     );
     assert_eq!(
         data.len() as u64 % BLOCK_SIZE,
         0,
-        "small file with initial_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
+        "small file with final_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
         data.len()
     );
 }
 
 #[test]
-fn initial_padding_aligns_multi_block_file() {
+fn final_padding_aligns_multi_block_file() {
     // Write enough data to span multiple blocks.
     let record: Vec<u8> = vec![0xAB; 1000];
     let records: Vec<&[u8]> = (0..300).map(|_| record.as_slice()).collect();
-    let data = write_records(&records, WriterOptions::new().initial_padding(BLOCK_SIZE));
+    let data = write_records(&records, WriterOptions::new().final_padding(BLOCK_SIZE));
     assert_eq!(
         data.len() as u64 % BLOCK_SIZE,
         0,
-        "multi-block file with initial_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
+        "multi-block file with final_padding({BLOCK_SIZE}) must have size % {BLOCK_SIZE} == 0, got {}",
         data.len()
     );
     // Verify records are still readable.
@@ -82,6 +100,75 @@ fn initial_padding_aligns_multi_block_file() {
 }
 
 // -----------------------------------------------------------------------
+// Small non-power-of-two alignments: the file ends on a multiple of the
+// alignment and stays readable (the padding chunk is skipped by the reader).
+// -----------------------------------------------------------------------
+
+#[test]
+fn final_padding_small_non_power_of_two_alignments() {
+    for alignment in [3u64, 17, 25, 60, 104, 1000] {
+        let records: &[&[u8]] = &[b"alpha", b"beta", b"gamma"];
+        let data = write_records(records, WriterOptions::new().final_padding(alignment));
+        assert_eq!(
+            data.len() as u64 % alignment,
+            0,
+            "file with final_padding({alignment}) must have size % {alignment} == 0, got {}",
+            data.len()
+        );
+        let got = read_all(data);
+        assert_eq!(got.len(), records.len(), "alignment {alignment}");
+        for (got_rec, expected) in got.iter().zip(records.iter()) {
+            assert_eq!(got_rec.as_slice(), *expected, "alignment {alignment}");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Differential: padding output is byte-for-byte identical to the C++ writer
+// for the same options, including non-power-of-two alignments and the
+// initial_padding no-op on fresh files.
+// -----------------------------------------------------------------------
+
+fn write_records_cpp(records: &[&[u8]], opts: riegeli_ffi::WriterOptions) -> Vec<u8> {
+    let mut w = riegeli_ffi::RecordWriter::new(opts).expect("cpp writer::new");
+    for rec in records {
+        w.write_record(rec).expect("cpp write_record");
+    }
+    w.close().expect("cpp close")
+}
+
+#[test]
+fn final_padding_matches_cpp_writer_bytes() {
+    let records: &[&[u8]] = &[b"alpha", b"beta", b"gamma"];
+    for alignment in [17u64, 60, 104, 4096, 65536] {
+        let rust = write_records(records, WriterOptions::new().final_padding(alignment));
+        let cpp = write_records_cpp(
+            records,
+            riegeli_ffi::WriterOptions::new()
+                .compression(riegeli_ffi::Compression::None)
+                .final_padding(alignment),
+        );
+        assert_eq!(rust, cpp, "byte mismatch for final_padding({alignment})");
+    }
+}
+
+#[test]
+fn initial_padding_noop_matches_cpp_writer_bytes() {
+    let records: &[&[u8]] = &[b"alpha", b"beta", b"gamma"];
+    let rust = write_records(records, WriterOptions::new().initial_padding(4096));
+    let cpp = write_records_cpp(
+        records,
+        riegeli_ffi::WriterOptions::new()
+            .compression(riegeli_ffi::Compression::None)
+            .initial_padding(4096),
+    );
+    assert_eq!(
+        rust, cpp,
+        "fresh files with initial_padding must match the C++ writer (no padding written)"
+    );
+}
+
+// -----------------------------------------------------------------------
 // two padded files can be concatenated and read as one
 // -----------------------------------------------------------------------
 
@@ -90,7 +177,7 @@ fn concatenated_padded_files_readable() {
     let records_a: &[&[u8]] = &[b"file_a_rec1", b"file_a_rec2", b"file_a_rec3"];
     let records_b: &[&[u8]] = &[b"file_b_rec1", b"file_b_rec2"];
 
-    let opts = WriterOptions::new().initial_padding(BLOCK_SIZE);
+    let opts = WriterOptions::new().final_padding(BLOCK_SIZE);
     let file_a = write_records(records_a, opts.clone());
     let file_b = write_records(records_b, opts);
 
@@ -204,12 +291,12 @@ fn final_padding_target_inside_block_header_shadow() {
 }
 
 #[test]
-fn initial_padding_target_inside_block_header_shadow() {
+fn final_padding_target_inside_block_header_shadow_with_records() {
     let alignment = 65_546u64;
     let record = vec![0x5Au8; 100];
     let data = write_records(
         &[record.as_slice()],
-        WriterOptions::new().initial_padding(alignment),
+        WriterOptions::new().final_padding(alignment),
     );
     assert_eq!(
         data.len() as u64 % alignment,
