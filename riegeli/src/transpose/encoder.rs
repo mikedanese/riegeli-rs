@@ -361,10 +361,19 @@ impl TransposeChunkEncoder {
     /// projection (skipping decompression of unneeded data) at the cost of
     /// slightly worse compression.
     ///
+    /// When compression is disabled the value is ignored and `u64::MAX` is
+    /// used, matching the C++ reference: bucket splitting only exists to
+    /// let projection skip decompression, which is pointless for
+    /// uncompressed data.
+    ///
     /// The default is `u64::MAX` (one bucket per non-empty buffer-type
     /// group, plus one for the non-proto lengths buffer).
     pub fn bucket_size(mut self, size: u64) -> Self {
-        self.bucket_size = size;
+        self.bucket_size = if self.compression == CompressionType::None {
+            u64::MAX
+        } else {
+            size
+        };
         self
     }
 
@@ -409,11 +418,12 @@ impl TransposeChunkEncoder {
     }
 
     /// Encode all accumulated records into a transposed chunk.
+    ///
+    /// Zero records take the same path as the general case, matching the C++
+    /// reference: `create_state_machine` emits a single NoOp state for an
+    /// empty tag sequence and the (empty) transitions section is still
+    /// written through the compressor.
     pub fn encode(mut self) -> Result<Chunk, RiegeliError> {
-        if self.num_records == 0 {
-            return self.encode_empty();
-        }
-
         let (all_buffers, buffer_sizes, buffer_pos, buffer_groups) =
             self.collect_and_sort_buffers();
 
@@ -1300,36 +1310,6 @@ impl TransposeChunkEncoder {
         transitions
     }
 
-    /// Encode an empty (zero-record) transposed chunk.
-    ///
-    /// Matches the C++ encoder, whose `CreateStateMachine` emits a single
-    /// `kNoOp` state when there are no encoded tags; a chunk with an empty
-    /// state machine would be rejected by the decoder (`first_node` is
-    /// always out of range when `num_states == 0`).
-    fn encode_empty(&self) -> Result<Chunk, RiegeliError> {
-        let mut header: Vec<u8> = Vec::new();
-        header.extend_from_slice(&encode_u32(0)); // num_buckets
-        header.extend_from_slice(&encode_u32(0)); // num_buffers
-        header.extend_from_slice(&encode_u32(1)); // num_states
-        header.extend_from_slice(&encode_u32(0)); // state 0 tag: kNoOp
-        header.extend_from_slice(&encode_u32(0)); // state 0 next_node
-        header.extend_from_slice(&encode_u32(0)); // first_node
-
-        let length_prefixed_header =
-            compress_length_prefixed(&header, self.compression, self.compress_opts)?;
-
-        let mut chunk_data: Vec<u8> = Vec::new();
-        chunk_data.push(self.compression as u8);
-        chunk_data.extend_from_slice(&length_prefixed_header);
-
-        let chunk_header = ChunkHeader::from_parts(&chunk_data, ChunkType::Transposed, 0, 0);
-
-        Ok(Chunk {
-            header: chunk_header,
-            data: chunk_data,
-        })
-    }
-
     /// Get or create a node for the given NodeId.
     fn get_or_create_node(&mut self, node_id: NodeId) -> u32 {
         if let Some(node) = self.message_nodes.get(&node_id) {
@@ -1984,6 +1964,50 @@ mod tests {
 
         let mut dec = TransposeChunkDecoder::new(chunk).expect("decoder");
         assert!(dec.read_record().unwrap().is_none());
+    }
+
+    /// The C++ reference has no zero-record shortcut: `CreateStateMachine`
+    /// emits a single NoOp state for an empty tag sequence, so the header is
+    /// num_buckets=0, num_buffers=0, num_states=1, tag=NoOp(0), base=0,
+    /// first_node=0. A header with num_states=0 is rejected by the decoder's
+    /// `first_node >= num_states` validation.
+    #[test]
+    fn test_zero_records_header_matches_reference() {
+        let enc = TransposeChunkEncoder::new(CompressionType::None);
+        let chunk = enc.encode().expect("encode");
+        // compression byte, varint(header_len=6), then the 6 header bytes
+        // listed above. With CompressionType::None the transitions section
+        // is raw (no varint prefix) and empty.
+        assert_eq!(
+            chunk.data,
+            vec![0x00, 0x06, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
+    }
+
+    /// The C++ reference always writes the transitions section through the
+    /// compressor (`transitions_compressor.EncodeAndClose`), so a compressed
+    /// zero-record chunk carries varint(0) plus an empty compressed stream
+    /// after the header. Omitting it makes the decoder fail while reading
+    /// the uncompressed_size prefix.
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn test_zero_records_compressed_carries_transitions_section() {
+        use crate::compression::decompress_with_prefix;
+
+        let enc = TransposeChunkEncoder::new(CompressionType::Zstd);
+        let chunk = enc.encode().expect("encode");
+
+        assert_eq!(chunk.data[0], CompressionType::Zstd as u8);
+        let (blob_len, consumed) = decode_u64(&chunk.data[1..]).expect("header blob length");
+        let transitions_start = 1 + consumed + blob_len as usize;
+        let transitions = &chunk.data[transitions_start..];
+        assert!(
+            !transitions.is_empty(),
+            "zero-record chunk is missing the transitions section"
+        );
+        let decompressed = decompress_with_prefix(transitions, CompressionType::Zstd)
+            .expect("transitions section must decompress");
+        assert!(decompressed.is_empty());
     }
 
     // -------------------------------------------------------------------
@@ -2682,24 +2706,19 @@ mod tests {
 
     /// 13.4: Multi-bucket encoder produces multiple buckets.
     #[test]
+    #[cfg(feature = "zstd")]
     fn multi_bucket_produces_multiple_buckets() {
-        use crate::varint::{decode_u32, decode_u64};
         let records: Vec<Vec<u8>> = (0..200)
             .map(|i| make_proto_3_varints_int(i, i * 2, i * 3))
             .collect();
 
-        let mut enc = TransposeChunkEncoder::new(CompressionType::None).bucket_size(64);
+        let mut enc = TransposeChunkEncoder::new(CompressionType::Zstd).bucket_size(64);
         for rec in &records {
             enc.add_record(rec).expect("add_record");
         }
         let chunk = enc.encode().expect("encode");
 
-        let data = &chunk.data;
-        assert_eq!(data[0], 0x00, "compression type should be None");
-        let (header_len, consumed) = decode_u64(&data[1..]).expect("header length");
-        let header_start = 1 + consumed;
-        let header_bytes = &data[header_start..header_start + header_len as usize];
-        let (num_buckets, _) = decode_u32(header_bytes).expect("num_buckets");
+        let num_buckets = read_num_buckets(&chunk, CompressionType::Zstd);
         assert!(
             num_buckets > 1,
             "expected multiple buckets with bucket_size=64, got {num_buckets}"
@@ -2714,6 +2733,50 @@ mod tests {
         for (i, (expected, actual)) in records.iter().zip(out.iter()).enumerate() {
             assert_eq!(expected, actual, "mismatch at record {i}");
         }
+    }
+
+    /// Parse `num_buckets` out of a transposed chunk's header.
+    fn read_num_buckets(chunk: &Chunk, compression: CompressionType) -> u32 {
+        use crate::compression::decompress_with_prefix;
+
+        let data = &chunk.data;
+        assert_eq!(data[0], compression as u8);
+        let (blob_len, consumed) = decode_u64(&data[1..]).expect("header blob length");
+        let blob = &data[1 + consumed..1 + consumed + blob_len as usize];
+        let header_bytes =
+            decompress_with_prefix(blob, compression).expect("decompress header");
+        let (num_buckets, _) = decode_u32(&header_bytes).expect("num_buckets");
+        num_buckets
+    }
+
+    /// The C++ reference forces `bucket_size` to `u64::MAX` when compression
+    /// is disabled, so uncompressed chunks are never split into multiple
+    /// buckets regardless of the configured bucket size (splitting only
+    /// exists to let projection skip decompression).
+    #[test]
+    fn bucket_size_ignored_when_compression_is_none() {
+        let records: Vec<Vec<u8>> = (0..200)
+            .map(|i| make_proto_3_varints_int(i, i * 2, i * 3))
+            .collect();
+
+        let mut enc = TransposeChunkEncoder::new(CompressionType::None).bucket_size(64);
+        for rec in &records {
+            enc.add_record(rec).expect("add_record");
+        }
+        let chunk = enc.encode().expect("encode");
+
+        let num_buckets = read_num_buckets(&chunk, CompressionType::None);
+        assert_eq!(
+            num_buckets, 1,
+            "uncompressed chunks must not be split into buckets"
+        );
+
+        let mut dec = TransposeChunkDecoder::new(chunk).expect("decoder");
+        let mut out = Vec::new();
+        while let Some(rec) = dec.read_record().expect("read_record") {
+            out.push(rec);
+        }
+        assert_eq!(out.len(), records.len());
     }
 
     /// 13.4: Multi-bucket with brotli.
